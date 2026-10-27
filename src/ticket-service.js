@@ -3,7 +3,7 @@ import { channelName, slugify, statusLabel, ticketNumber, TYPE_BY_KEY } from './
 import { isFullCategory, isServerChannelLimit, isUnknownChannel, isUnknownMessage, UserError } from './errors.js';
 import { KeyedLock } from './lock.js';
 import { ChannelNameSynchronizer } from './name-sync.js';
-import { closedOwnerWrites, snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
+import { snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
 import { initialTicketMessage, ticketPanel, TICKET_PANEL_VERSION } from './ui.js';
 
 const slot = (ownerId, type) => `${ownerId}:${type}`;
@@ -58,14 +58,21 @@ export class TicketService {
     return await this.#fetchChannel(guild, ticket) ? ticket : null;
   }
 
-  async #withTicket(guild, channelId, action) {
+  #clearPendingDeletion(guild, ticket) {
+    const restored = this.store.save({ ...ticket, pendingDeletion: null });
+    if (restored.renamePending) this.names.schedule(guild, restored.channelId);
+    return restored;
+  }
+
+  async #withTicket(guild, channelId, action, { restoreTransition = true } = {}) {
     this.#assertGuild(guild);
     const original = this.requireTicket(channelId);
     return this.locks.run(slot(original.ownerId, original.type), async () => {
       let ticket = this.requireTicket(channelId);
       const channel = await this.#fetchChannel(guild, ticket);
       if (!channel) throw new UserError('Ce salon de ticket n’existe plus.');
-      if (ticket.pendingTransition) ticket = await this.#restoreTransition(guild, channel, ticket);
+      if (ticket.pendingDeletion) ticket = this.#clearPendingDeletion(guild, ticket);
+      if (ticket.pendingTransition && restoreTransition) ticket = await this.#restoreTransition(guild, channel, ticket);
       return action(ticket, channel);
     });
   }
@@ -85,10 +92,11 @@ export class TicketService {
       const ticket = {
         channelId: '', number: this.store.allocateNumber(), type: typeKey,
         ownerId: user.id, ownerName: user.globalName || user.username || 'membre',
-        status: 'waiting', assignedTo: null, progressDetail: null,
+        status: 'waiting', assignedTo: null, assignmentRevision: 0, progressDetail: null, urgent: false,
         staffRoleIds: [...this.config.staffRolesByType[typeKey]], roleSyncPending: null,
-        pendingTransition: null, renamePending: false, panelMessageId: null, panelVersion: null,
-        createdAt, updatedAt: createdAt, closedAt: null, closedPermissions: null, deletedAt: null,
+        pendingTransition: null, pendingDeletion: null, renamePending: false, panelMessageId: null, panelVersion: null,
+        createdAt, updatedAt: createdAt, closedAt: null, closedBy: null, closedPermissions: null,
+        deletedAt: null, deletedBy: null, deletionRequestedAt: null,
       };
       let channel;
       try {
@@ -222,7 +230,7 @@ export class TicketService {
     return { ticket: this.store.get(oldTicket.channelId), warning: warnings.join(' ') };
   }
 
-  async setStatus(guild, channelId, status, actorId, detail = '') {
+  async setStatus(guild, channelId, status, actorId, detail = '', { expectedAssignee, expectedAssignmentRevision } = {}) {
     if (!['waiting', 'claimed', 'progress', 'resolved'].includes(status)) throw new Error('Transition de statut invalide.');
     const cleanedDetail = String(detail).replace(/\s+/g, ' ').trim();
     if (status === 'progress' && (cleanedDetail.length < 2 || cleanedDetail.length > 40 || !slugify(cleanedDetail))) {
@@ -230,28 +238,97 @@ export class TicketService {
     }
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé. Rouvrez-le avant de modifier son statut.');
+      if (status === 'claimed') {
+        if (expectedAssignee !== undefined && (ticket.assignedTo !== expectedAssignee
+          || (ticket.assignmentRevision ?? 0) !== expectedAssignmentRevision)) {
+          throw new UserError('Le responsable a changé depuis votre demande. Relancez la prise en charge.');
+        }
+        if (ticket.assignedTo && ticket.assignedTo !== actorId && expectedAssignee === undefined) {
+          return { ticket, conflict: ticket.assignedTo };
+        }
+      }
       const progressDetail = status === 'progress' ? cleanedDetail : null;
       const assignedTo = status === 'waiting' ? null : (status === 'claimed' ? actorId : (ticket.assignedTo || actorId));
       if (ticket.status === status && ticket.progressDetail === progressDetail && ticket.assignedTo === assignedTo) {
         if (ticket.renamePending) this.names.schedule(guild, channelId, { retryNow: true });
         return { ticket, warning: '', unchanged: true };
       }
-      const next = { ...ticket, status, progressDetail, assignedTo, updatedAt: now() };
+      const assignmentRevision = (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== assignedTo);
+      const next = { ...ticket, status, progressDetail, assignedTo, assignmentRevision, updatedAt: now() };
       return this.#commitTransition(guild, channel, ticket, next, actorId);
     });
   }
 
+  async setUrgent(guild, channelId, urgent, actorId) {
+    if (typeof urgent !== 'boolean') throw new Error('Priorité invalide.');
+    return this.#withTicket(guild, channelId, async (ticket, channel) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      if (Boolean(ticket.urgent) === urgent) return { ticket, warning: '', unchanged: true };
+      // Ne pas changer updatedAt : l'ancienneté de la file dépend du statut,
+      // pas d'un ajustement de priorité.
+      const next = this.store.save({ ...ticket, urgent });
+      const warnings = [];
+      try { await this.#refreshPanel(channel, next); }
+      catch (error) {
+        this.logger.error('Priorité enregistrée, mais panneau non actualisé :', error);
+        warnings.push('Le panneau n’a pas pu être actualisé : utilisez /ticket-panneau.');
+      }
+      try {
+        await channel.send({
+          content: `${urgent ? '🚨 Priorité urgente' : 'Priorité normale'} • Mise à jour par <@${actorId}>.`,
+          allowedMentions: { parse: [] },
+        });
+      } catch (error) {
+        this.logger.error('Priorité enregistrée, mais message de suivi non envoyé :', error);
+        warnings.push('Le message de suivi n’a pas pu être envoyé.');
+      }
+      return { ticket: this.store.get(channelId), warning: warnings.join(' ') };
+    });
+  }
+
+  async #deleteConfirmed(guild, ticket, channel, actorId) {
+    // Conserver l'intention AVANT l'appel Discord. Après une interruption, on
+    // vérifie l'existence du salon au lieu de le supprimer sans confirmation.
+    const pending = this.store.save({ ...ticket, pendingDeletion: { actorId, requestedAt: now() } });
+    // Ne pas retirer un renommage encore en vol tant que la suppression peut
+    // échouer : cela permet de le reprendre sans lancer deux PATCH concurrents.
+    try {
+      await channel.delete(`Fermeture du ticket #${ticketNumber(ticket.number)} par ${actorId}`);
+    } catch (error) {
+      if (!isUnknownChannel(error)) {
+        let stillExists;
+        try {
+          stillExists = Boolean(await guild.channels.fetch(ticket.channelId, { force: true }));
+        } catch (checkError) {
+          if (isUnknownChannel(checkError)) stillExists = false;
+          else {
+            this.logger.error('Impossible de vérifier une suppression de ticket interrompue :', checkError);
+            throw new UserError('Impossible de vérifier la suppression. Prévenez un administrateur avant de réessayer.');
+          }
+        }
+        if (stillExists) {
+          this.#clearPendingDeletion(guild, pending);
+          this.logger.error('Le salon du ticket n’a pas pu être supprimé :', error);
+          throw new UserError('Le salon n’a pas été supprimé. Vérifiez les permissions du bot puis réessayez.');
+        }
+      }
+    }
+    // Un éventuel événement ChannelDelete est sérialisé par le même verrou.
+    try {
+      return { ticket: this.store.markDeleted(ticket.channelId) };
+    } finally {
+      // Même en cas d'échec disque, Discord a confirmé la disparition du salon.
+      this.names.cancel(ticket.channelId);
+    }
+  }
+
+  // Une suppression confirmée ne nécessite pas de restaurer les permissions
+  // d'une transition inachevée ; si elle échoue, son journal reste intact.
   async close(guild, channelId, actorId) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
-      if (ticket.status === 'closed') throw new UserError('Ce ticket est déjà fermé.');
-      const timestamp = now();
-      const before = snapshotOwnerWrites(channel, ticket.ownerId);
-      const next = {
-        ...ticket, status: 'closed', progressDetail: null, closedAt: timestamp,
-        closedPermissions: before, updatedAt: timestamp,
-      };
-      return this.#commitTransition(guild, channel, ticket, next, actorId, { before, after: closedOwnerWrites() });
-    });
+      if (ticket.status === 'closed') throw new UserError('Cet ancien ticket est déjà fermé. Utilisez Supprimer pour retirer son salon.');
+      return this.#deleteConfirmed(guild, ticket, channel, actorId);
+    }, { restoreTransition: false });
   }
 
   async reopen(guild, channelId, actorId) {
@@ -265,20 +342,19 @@ export class TicketService {
       }
       const next = {
         ...ticket, status: 'waiting', assignedTo: null, progressDetail: null,
-        closedAt: null, closedPermissions: null, updatedAt: now(),
+        assignmentRevision: (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== null),
+        closedAt: null, closedBy: null, closedPermissions: null, updatedAt: now(),
       };
       const before = snapshotOwnerWrites(channel, ticket.ownerId);
       return this.#commitTransition(guild, channel, ticket, next, actorId, { before, after: saved });
     });
   }
 
-  async delete(guild, channelId) {
+  async delete(guild, channelId, actorId) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
-      if (ticket.status !== 'closed') throw new UserError('Fermez le ticket avant de le supprimer.');
-      await channel.delete(`Suppression du ticket fermé #${ticketNumber(ticket.number)}`);
-      this.names.cancel(channelId);
-      this.store.markDeleted(channelId);
-    });
+      if (ticket.status !== 'closed') throw new UserError('Utilisez Fermer pour supprimer ce ticket.');
+      return this.#deleteConfirmed(guild, ticket, channel, actorId);
+    }, { restoreTransition: false });
   }
 
   async repair(guild, channelId) {
@@ -296,6 +372,21 @@ export class TicketService {
     const ticket = this.store.get(channel.id);
     if (!ticket || ticket.status === 'deleted') return;
     await this.locks.run(slot(ticket.ownerId, ticket.type), () => this.store.markDeleted(channel.id));
+  }
+
+  async recoverPendingDeletions(guild) {
+    this.#assertGuild(guild);
+    for (const stored of this.store.list()) {
+      if (stored.status === 'deleted' || !stored.pendingDeletion) continue;
+      await this.locks.run(slot(stored.ownerId, stored.type), async () => {
+        const ticket = this.store.get(stored.channelId);
+        if (!ticket || ticket.status === 'deleted' || !ticket.pendingDeletion) return;
+        const channel = await this.#fetchChannel(guild, ticket);
+        // S'il existe encore, l'opération n'est pas reprise sans nouvelle
+        // confirmation. S'il n'existe plus, #fetchChannel l'a marqué supprimé.
+        if (channel) this.#clearPendingDeletion(guild, ticket);
+      });
+    }
   }
 
   async recoverPendingTransitions(guild) {

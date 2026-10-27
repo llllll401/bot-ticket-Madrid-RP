@@ -2,6 +2,8 @@
 
 Un bot de tickets en français pour **un seul serveur Discord**, configurable par son ID. Les membres ouvrent un salon privé depuis un menu ; l’équipe suit le dossier avec des boutons et voit son statut directement dans le nom du salon.
 
+> **Attention : fermer un ticket supprime définitivement son salon et tous ses messages après confirmation. Aucune transcription automatique n’est créée.**
+
 ## Types de tickets
 
 - Plainte
@@ -23,9 +25,9 @@ Discord ne permet pas de colorer directement le texte des noms de salons : le bo
 | 🟠 | Pris en charge | `🟠-pris-en-charge-plainte-joueur-0001` |
 | 🟡 | En cours de… | `🟡-en-cours-de-verification-plainte-joueur-0001` |
 | 🟢 | Traité | `🟢-traite-plainte-joueur-0001` |
-| ⚫ | Fermé | `⚫-ferme-plainte-joueur-0001` |
+| ⚫ | Ancien ticket fermé avant la mise à jour | `⚫-ferme-plainte-joueur-0001` |
 
-Le numéro reste identique tout au long du ticket. Pour « En cours de… », un formulaire permet au staff d’indiquer une étape courte (par exemple `vérification` ou `enquête`). Choisissez un libellé non sensible : il apparaît dans le nom du salon.
+Les nouvelles fermetures suppriment le salon : elles ne produisent donc pas de nom noir. Le numéro reste identique tout au long du ticket. Pour « En cours de… », un formulaire permet au staff d’indiquer une étape courte (par exemple `vérification` ou `enquête`). Choisissez un libellé non sensible : il apparaît dans le nom du salon.
 
 **Limite Discord :** les renommages de salons sont limités et peuvent être retardés plusieurs minutes. Pour ne pas bloquer le traitement, les boutons et les permissions sont mis à jour immédiatement, tandis que le nom est synchronisé en arrière-plan avec le dernier statut. Pendant ce délai, le nom peut donc afficher l’ancien statut : le panneau du ticket indique alors `⏳` et reste la référence à jour. Laissez le bot en ligne ; il retente automatiquement et reprend les renommages en attente après un redémarrage. Voir les [limites de l’API Discord](https://docs.discord.com/developers/topics/rate-limits).
 
@@ -40,7 +42,7 @@ Le numéro reste identique tout au long du ticket. Pour « En cours de… », un
    https://discord.com/oauth2/authorize?client_id=ID_APPLICATION&permissions=378225675280&scope=bot%20applications.commands
    ```
 
-   Le bot a besoin de voir et gérer les salons, gérer les permissions des rôles/membres, envoyer des messages, intégrer des liens, joindre des fichiers, lire l’historique et gérer les droits d’écriture dans les fils. `Gérer les rôles` est une permission sensible : utilisez un bot dédié et vérifiez sa position dans la hiérarchie des rôles. Les restrictions propres à un salon ou à une catégorie doivent aussi laisser le bot travailler.
+   Le bot a besoin de voir et gérer les salons, gérer les permissions des rôles/membres, envoyer des messages, intégrer des liens, joindre des fichiers, lire l’historique et gérer les droits d’écriture dans les fils. **`Gérer les salons` est indispensable pour supprimer un ticket**, y compris dans le salon concerné. `Gérer les rôles` est une permission sensible : utilisez un bot dédié et vérifiez sa position dans la hiérarchie des rôles. Les restrictions propres à un salon ou à une catégorie doivent aussi laisser le bot travailler.
 3. Activez le **mode développeur** dans les paramètres Discord, puis copiez l’ID du serveur, les IDs des rôles de l’équipe et les IDs des six catégories Discord où créer les tickets. Ces catégories doivent déjà exister sur le serveur. Le rôle `@everyone` ne peut pas être utilisé comme rôle staff.
 4. Les intents privilégiés ne sont pas nécessaires : ne les activez pas pour ce bot.
 
@@ -116,25 +118,32 @@ Un menu public avec les six types apparaît. Le salon du panneau doit être visi
 ## Utilisation au quotidien
 
 1. Le membre choisit un type dans le menu et décrit sa demande dans le salon créé. Le bot mentionne les rôles concernés ; pour qu’une mention de rôle déclenche une notification, le rôle doit être mentionnable ou les réglages Discord doivent l’autoriser.
-2. Un membre du staff autorisé clique sur **Prendre en charge**. Il peut reprendre un ticket déjà attribué. **En cours de…** permet de préciser l’étape ; **Marquer traité** le passe au vert. Utiliser ces deux actions sans prise en charge préalable attribue le ticket au membre du staff qui les utilise. **Remettre en attente** enlève le responsable et l’étape pour replacer le ticket dans la file rouge. Répéter exactement la même action ne crée pas de nouveau message inutile.
-3. Le créateur ou le staff peut **Fermer** après confirmation, y compris avant que le ticket soit traité. Le créateur conserve l’accès en lecture seule ; le staff peut toujours lire et répondre. Marquer traité **ne ferme pas** automatiquement le ticket : il compte encore comme ouvert tant qu’il n’est pas fermé.
-4. Le staff peut **Rouvrir** un ticket fermé : il repasse en attente, sans responsable attribué. S’il existe déjà un autre ticket ouvert du même type pour ce membre, il faut d’abord fermer ce dernier.
-5. Le staff peut **Supprimer** un ticket fermé après une deuxième confirmation. Le salon et tous ses messages sont alors **définitivement supprimés**. Aucune transcription automatique n’est créée : archivez les échanges autrement avant suppression si nécessaire.
+2. Un membre du staff autorisé clique sur **Prendre en charge** ou lance **`/ticket-prendre`** dans le salon. Si le ticket a déjà un autre responsable, une confirmation privée est demandée avant de le reprendre ; si la responsabilité a changé entre-temps, il faut recommencer. **En cours de…** précise l’étape et **Marquer traité** passe le ticket au vert ; sans responsable, ces actions l’attribuent à la personne qui les utilise. **Remettre en attente** enlève le responsable et l’étape pour replacer le ticket dans la file rouge.
+3. Le staff peut cliquer sur **Marquer urgent** ou **Retirer l’urgence**. La priorité apparaît sur le panneau du salon (visible par le créateur) et dans `/tickets`, sans changer le statut ni l’ancienneté. Répéter une même action déjà appliquée ne crée pas de nouveau message inutile.
+4. Le créateur ou le staff peut cliquer sur **Fermer** ou lancer **`/ticket-fermer`** dans le salon, puis confirmer. Cela **supprime définitivement le salon et tous ses messages**, sans transcription automatique ; le ticket ne peut pas être rouvert. Le membre peut ensuite ouvrir un nouveau ticket du même type. La confirmation peut être annulée. **Marquer traité ne ferme pas automatiquement** : le ticket reste ouvert jusqu’à sa fermeture explicite.
 
-Les boutons de gestion sont réservés aux rôles configurés pour le type concerné et aux administrateurs. Le créateur ne peut que fermer son propre ticket. Les tickets sont privés pour `@everyone` et ouverts explicitement au créateur, aux rôles concernés et au bot. **Les administrateurs Discord contournent les restrictions de salons**, et les personnes pouvant modifier les permissions du serveur peuvent aussi changer l’accès : vérifiez vos rôles pour les demandes sensibles.
+### Anciens tickets fermés
+
+Les salons déjà fermés en lecture seule **avant cette mise à jour sont conservés** : le bot ne les supprime pas automatiquement. Leurs panneaux sont adaptés pour que le staff puisse soit les **Rouvrir** (en restaurant les droits d’écriture enregistrés et en les remettant en attente), soit **Supprimer le salon** après confirmation. Pour rouvrir, aucun autre ticket du même type ne doit être ouvert par ce membre. Les anciennes confirmations de fermeture, qui promettaient une simple lecture seule, sont refusées : relancez la fermeture pour voir le nouvel avertissement.
+
+Le **menu public** publié avant la mise à jour n’est pas remplacé automatiquement. Pour actualiser sa légende, relancez `/panneau-tickets` dans son salon, puis supprimez vous-même l’ancien message si vous le souhaitez. L’ancien menu continue néanmoins à ouvrir des tickets.
+
+Les boutons de gestion sont réservés aux rôles configurés pour le type concerné et aux administrateurs. La prise en charge indique un responsable mais **ne retire pas l’accès aux autres membres du staff autorisés**. Le créateur ne peut que fermer son propre ticket. Les tickets sont privés pour `@everyone` et ouverts explicitement au créateur, aux rôles concernés et au bot. **Les administrateurs Discord contournent les restrictions de salons**, et les personnes pouvant modifier les permissions du serveur peuvent aussi changer l’accès : vérifiez vos rôles pour les demandes sensibles.
 
 ### Suivi de plusieurs tickets
 
-Le staff peut lancer **`/tickets`** depuis un salon où les commandes sont autorisées. La réponse est personnelle et éphémère ; elle affiche par défaut les tickets ouverts, en plaçant d’abord les tickets en attente les plus anciens. Pour un ticket remis en attente ou rouvert, l’ancienneté repart de ce changement de statut. Les boutons permettent de changer de page ou d’actualiser la liste.
+Le staff peut lancer **`/tickets`** depuis un salon où les commandes sont autorisées. La réponse est personnelle et éphémère ; elle affiche par défaut les tickets ouverts : les **urgents d’abord**, puis les statuts en commençant par les attentes les plus anciennes. Pour un ticket remis en attente ou rouvert, l’ancienneté repart de ce changement de statut. Les boutons permettent de changer de page, d’actualiser ou de filtrer rapidement les **urgents** et les tickets **sans responsable** ; les deux filtres peuvent être combinés.
 
 Options disponibles dans la commande :
 
-- `statut` : en attente, pris en charge, en cours, traité, fermé, tous les ouverts ou tous les statuts ;
+- `statut` : en attente, pris en charge, en cours, traité, anciens fermés, tous les ouverts ou les ouverts et anciens fermés ;
 - `categorie` : l’un des six types de tickets ;
 - `responsable` : les tickets attribués à la personne choisie ;
-- `mes_tickets` : uniquement les tickets attribués à la personne qui utilise la commande, et non ceux qu’elle a créés. Ne combinez pas ce filtre avec un autre responsable.
+- `mes_tickets` : uniquement les tickets attribués à la personne qui utilise la commande, et non ceux qu’elle a créés ; ne combinez pas ce filtre avec un responsable différent ;
+- `sans_responsable` : uniquement les tickets non attribués ; ne combinez pas ce filtre avec `responsable` ou `mes_tickets` ;
+- `priorite` : urgente ou normale. Les anciens tickets sans priorité enregistrée sont considérés comme normaux.
 
-Les compteurs indiquent les tickets **visibles**, par statut, dans la catégorie et le filtre de responsable choisis ; ils incluent les fermés même si la liste est filtrée sur les tickets ouverts. La vue ne montre ni les salons manquants ou supprimés, ni les tickets d’un type non autorisé, ni ceux dont la personne ne peut pas voir le salon. Ces droits sont revérifiés à chaque page et actualisation. Si les droits changent après l’affichage, actualisez : une information déjà affichée ne peut pas être retirée de la mémoire ou des captures d’écran du destinataire. Si le tableau a expiré, relancez `/tickets`.
+Les compteurs indiquent les tickets **visibles**, par statut, après application des filtres catégorie, responsable et priorité ; ils incluent les anciens fermés même si la liste est filtrée sur les tickets ouverts. La vue ne montre ni les salons manquants ou supprimés, ni les tickets d’un type non autorisé, ni ceux dont la personne ne peut pas voir le salon. Ces droits sont revérifiés à chaque page, actualisation et filtre rapide. Si les droits changent après l’affichage, actualisez : une information déjà affichée ne peut pas être retirée de la mémoire ou des captures d’écran du destinataire. Si le tableau a expiré, relancez `/tickets`.
 
 ### Réparation
 
@@ -146,11 +155,13 @@ Si le panneau de gestion d’un ticket a été supprimé ou si son nom a été m
 
 ## Données et exploitation
 
-Le registre `data/tickets.json` contient les IDs, les statuts, les responsables et les informations nécessaires au suivi, **pas le contenu des messages**. Il est écrit de manière atomique et lié à l’ID du serveur. Conservez-le sur un stockage persistant et sauvegardez-le régulièrement ; ne le supprimez pas lors d’une mise à jour ou d’un redéploiement. Si vous changez de serveur, utilisez un autre fichier de données. Un fichier invalide ou lié à un autre serveur bloque le démarrage au lieu d’être écrasé.
+Le registre `data/tickets.json` contient les IDs, les statuts, les priorités, les responsables et les informations nécessaires au suivi, **pas le contenu des messages**. Lors d’une fermeture ou d’une suppression confirmée, il conserve aussi l’ID de la personne qui l’a demandée et la date de demande. Les métadonnées restent dans le registre après suppression : protégez ce fichier et définissez une politique de conservation adaptée. Il est écrit de manière atomique et lié à l’ID du serveur. Conservez-le sur un stockage persistant et sauvegardez-le régulièrement ; ne le supprimez pas lors d’une mise à jour ou d’un redéploiement. Si vous changez de serveur, utilisez un autre fichier de données. Un fichier invalide ou lié à un autre serveur bloque le démarrage au lieu d’être écrasé.
 
-Ne lancez **qu’une seule instance** du bot pour ce registre : le stockage local n’est pas partagé entre processus. Les tickets fermés restent des salons Discord jusqu’à leur suppression ; définissez une politique de conservation adaptée et sauvegardez ce qui doit l’être avant suppression.
+Si la suppression est interrompue ou que sa réponse est incertaine, le bot vérifie au redémarrage : si le salon a disparu, il finalise le registre ; s’il existe encore, il **ne le supprime pas automatiquement** et une nouvelle confirmation est nécessaire. Si Discord ne permet pas de vérifier, le journal est conservé et l’initialisation peut être arrêtée jusqu’à résolution du problème. Une suppression refusée laisse le ticket ouvert : vérifiez les permissions puis réessayez.
 
-Discord limite actuellement une catégorie à **50 salons** et un serveur à **500 salons**, toutes utilisations confondues. Les tickets fermés et les autres salons occupent aussi ces places. Si Discord refuse une création parce que la catégorie ou le serveur est plein, le membre reçoit une explication et le bot ne crée pas le ticket ailleurs. Libérez de la place, ou modifiez l’ID explicite du type dans `config.json` pour les futurs tickets puis redémarrez ; les tickets existants ne sont pas déplacés. Les plafonds Discord peuvent évoluer : consultez les [limites Discord](https://support.discord.com/hc/en-us/articles/33694251638295-Discord-Account-Caps-Server-Caps-and-More).
+Ne lancez **qu’une seule instance** du bot pour ce registre : le stockage local n’est pas partagé entre processus. Les salons des anciens tickets fermés sont conservés jusqu’à une suppression explicite. Vérifiez les besoins de conservation et prévenez les personnes concernées avant toute suppression ; le bot n’archive ni ne diffuse les conversations.
+
+Discord limite actuellement une catégorie à **50 salons** et un serveur à **500 salons**, toutes utilisations confondues. Les anciens tickets fermés conservés et les autres salons occupent aussi ces places. Si Discord refuse une création parce que la catégorie ou le serveur est plein, le membre reçoit une explication et le bot ne crée pas le ticket ailleurs. Libérez de la place, ou modifiez l’ID explicite du type dans `config.json` pour les futurs tickets puis redémarrez ; les tickets existants ne sont pas déplacés. Les plafonds Discord peuvent évoluer : consultez les [limites Discord](https://support.discord.com/hc/en-us/articles/33694251638295-Discord-Account-Caps-Server-Caps-and-More).
 
 ### Vérifier le projet
 

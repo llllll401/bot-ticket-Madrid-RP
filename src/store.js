@@ -27,7 +27,15 @@ function validTicket(ticket, channelId, guildId) {
       || ticket.roleSyncPending.some((role) => !isId(role) || role === guildId)
       || new Set(ticket.roleSyncPending).size !== ticket.roleSyncPending.length))
     || (ticket.renamePending != null && typeof ticket.renamePending !== 'boolean')
+    || (ticket.urgent != null && typeof ticket.urgent !== 'boolean')
+    || (ticket.assignmentRevision != null && (!Number.isSafeInteger(ticket.assignmentRevision) || ticket.assignmentRevision < 0))
     || (ticket.panelVersion != null && (!Number.isSafeInteger(ticket.panelVersion) || ticket.panelVersion < 1))
+    || (ticket.closedBy != null && !isId(ticket.closedBy))
+    || (ticket.deletedBy != null && !isId(ticket.deletedBy))
+    || (ticket.deletionRequestedAt != null && !isDate(ticket.deletionRequestedAt))
+    || (ticket.pendingDeletion != null && (typeof ticket.pendingDeletion !== 'object'
+      || Array.isArray(ticket.pendingDeletion) || !isId(ticket.pendingDeletion.actorId)
+      || !isDate(ticket.pendingDeletion.requestedAt) || ticket.status === 'deleted'))
     || !isOptionalId(ticket.assignedTo) || !isOptionalId(ticket.panelMessageId)
     || !isDate(ticket.createdAt) || !isDate(ticket.updatedAt)
     || !isOptionalDate(ticket.closedAt) || !isOptionalDate(ticket.deletedAt)
@@ -40,7 +48,9 @@ function validTicket(ticket, channelId, guildId) {
   }
   if (ticket.status === 'progress' && (!ticket.progressDetail || !slugify(ticket.progressDetail))) return false;
   if (ticket.status === 'closed' && (!isDate(ticket.closedAt) || !isClosedWrites(ticket.closedPermissions))) return false;
-  if (!['closed', 'deleted'].includes(ticket.status) && (ticket.closedAt !== null || ticket.closedPermissions !== null || ticket.deletedAt !== null)) return false;
+  if (ticket.status !== 'deleted' && (ticket.deletedBy != null || ticket.deletionRequestedAt != null)) return false;
+  if (!['closed', 'deleted'].includes(ticket.status)
+    && (ticket.closedAt !== null || ticket.closedBy != null || ticket.closedPermissions !== null || ticket.deletedAt !== null)) return false;
   return true;
 }
 
@@ -160,6 +170,13 @@ export class TicketStore {
     const ticket = this.get(channelId);
     if (!ticket || ticket.status === 'deleted') return ticket;
     const timestamp = new Date().toISOString();
-    return this.save({ ...ticket, status: 'deleted', deletedAt: timestamp, updatedAt: timestamp });
+    return this.save({
+      ...ticket, status: 'deleted', deletedAt: timestamp, updatedAt: timestamp,
+      closedAt: ticket.closedAt ?? ticket.pendingDeletion?.requestedAt ?? null,
+      closedBy: ticket.closedBy ?? (ticket.status === 'closed' ? null : (ticket.pendingDeletion?.actorId ?? null)),
+      deletedBy: ticket.pendingDeletion?.actorId ?? null,
+      deletionRequestedAt: ticket.pendingDeletion?.requestedAt ?? null,
+      pendingDeletion: null, pendingTransition: null, renamePending: false,
+    });
   }
 }

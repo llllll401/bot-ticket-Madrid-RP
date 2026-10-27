@@ -4,7 +4,7 @@ import { UserError } from './errors.js';
 import { KeyedLock } from './lock.js';
 import { isOverviewButton, overviewQueryFromOptions, parseOverviewButton, renderOverview } from './overview.js';
 import { canManageServer, isStaff } from './permissions.js';
-import { confirmationRow, IDS, progressModal, publicPanel } from './ui.js';
+import { confirmationRow, IDS, progressModal, publicPanel, takeoverRow } from './ui.js';
 
 const ephemeral = { flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } };
 
@@ -26,6 +26,24 @@ function feedback(result) {
   const introduction = result.unchanged ? 'Aucun changement' : 'Statut mis à jour';
   const nameInfo = result.ticket.renamePending ? ' Le nom du salon sera synchronisé dès que Discord le permettra.' : '';
   return `${introduction} : **${escapeMarkdown(statusLabel(result.ticket))}**.${nameInfo}${result.warning ? `\n⚠️ ${result.warning}` : ''}`;
+}
+
+async function askToClose(interaction) {
+  await interaction.reply({
+    content: '⚠️ Fermer supprimera définitivement ce salon et tous ses messages. Aucune transcription automatique n’est enregistrée. Continuer ?',
+    components: [confirmationRow(IDS.closeDeleteConfirm)], ...ephemeral,
+  });
+}
+
+async function reportClaim(interaction, result) {
+  if (result.conflict) {
+    await interaction.editReply({
+      content: `Ce ticket est déjà attribué à <@${result.conflict}>. Voulez-vous le reprendre ?`,
+      components: [takeoverRow(interaction.user.id, result.conflict, result.ticket.assignmentRevision ?? 0)], allowedMentions: { parse: [] },
+    });
+  } else {
+    await interaction.editReply({ content: feedback(result), components: [], allowedMentions: { parse: [] } });
+  }
 }
 
 async function reportError(interaction, error, logger) {
@@ -64,6 +82,17 @@ export function createInteractionHandler({ config, service, logger = console }) 
           await interaction.deferReply(ephemeral);
           const message = await service.repair(interaction.guild, interaction.channelId);
           await interaction.editReply({ content: `✅ Panneau rétabli : ${message.url}\nLe nom du salon sera synchronisé dès que Discord le permettra.` });
+        } else if (interaction.commandName === 'ticket-prendre') {
+          const ticket = service.requireTicket(interaction.channelId);
+          ensureStaff(interaction, ticket, config);
+          ensureOpen(ticket);
+          await interaction.deferReply(ephemeral);
+          await reportClaim(interaction, await service.setStatus(interaction.guild, interaction.channelId, 'claimed', interaction.user.id));
+        } else if (interaction.commandName === 'ticket-fermer') {
+          const ticket = service.requireTicket(interaction.channelId);
+          ensureCanClose(interaction, ticket, config);
+          ensureOpen(ticket);
+          await askToClose(interaction);
         } else if (interaction.commandName === 'tickets') {
           const query = overviewQueryFromOptions(interaction.options, interaction.user.id);
           await interaction.deferReply(ephemeral);
@@ -120,21 +149,44 @@ export function createInteractionHandler({ config, service, logger = console }) 
         await interaction.update({ content: 'Action annulée.', components: [] });
         return;
       }
-      if (![IDS.claim, IDS.waiting, IDS.progress, IDS.resolve, IDS.close, IDS.closeConfirm, IDS.reopen, IDS.delete, IDS.deleteConfirm].includes(interaction.customId)) return;
+      if (interaction.customId?.startsWith(IDS.claimTakeover)) {
+        const parts = interaction.customId.slice(IDS.claimTakeover.length).split(':');
+        const [actorId, expectedAssignee, revision] = parts;
+        if (parts.length !== 3 || !/^\d{17,20}$/.test(actorId) || !/^\d{17,20}$/.test(expectedAssignee)
+          || !/^\d{1,16}$/.test(revision) || !Number.isSafeInteger(Number(revision))
+          || actorId !== interaction.user.id) {
+          throw new UserError('Cette confirmation ne vous appartient pas. Relancez la prise en charge.');
+        }
+        const ticket = service.requireTicket(interaction.channelId);
+        ensureStaff(interaction, ticket, config);
+        ensureOpen(ticket);
+        await interaction.deferUpdate();
+        const result = await service.setStatus(interaction.guild, interaction.channelId, 'claimed', actorId, '', {
+          expectedAssignee, expectedAssignmentRevision: Number(revision),
+        });
+        await reportClaim(interaction, result);
+        return;
+      }
+      if (![IDS.claim, IDS.waiting, IDS.urgent, IDS.normal, IDS.progress, IDS.resolve, IDS.close,
+        IDS.closeConfirm, IDS.closeDeleteConfirm, IDS.reopen, IDS.delete, IDS.deleteConfirm].includes(interaction.customId)) return;
       const ticket = service.requireTicket(interaction.channelId);
 
-      if (interaction.customId === IDS.close || interaction.customId === IDS.closeConfirm) {
+      if ([IDS.close, IDS.closeConfirm, IDS.closeDeleteConfirm].includes(interaction.customId)) {
         ensureCanClose(interaction, ticket, config);
         ensureOpen(ticket);
-        if (interaction.customId === IDS.close) {
-          await interaction.reply({
-            content: 'Fermer ce ticket ? Le créateur pourra toujours le lire, mais ne pourra plus y écrire. L’équipe pourra le rouvrir.',
-            components: [confirmationRow(IDS.closeConfirm)], ...ephemeral,
+        if (interaction.customId === IDS.closeConfirm) {
+          // Une confirmation de l'ancienne version annonçait une simple mise en
+          // lecture seule : elle ne doit jamais déclencher une suppression.
+          await interaction.update({
+            content: 'Cette ancienne confirmation a expiré. Utilisez de nouveau Fermer : le salon sera désormais supprimé.', components: [],
           });
+        } else if (interaction.customId === IDS.close) {
+          await askToClose(interaction);
         } else {
-          await interaction.deferUpdate();
-          const result = await service.close(interaction.guild, interaction.channelId, interaction.user.id);
-          await interaction.editReply({ content: `✅ Ticket fermé. Le nom du salon sera synchronisé dès que Discord le permettra.${result.warning ? `\n⚠️ ${result.warning}` : ''}`, components: [] });
+          // Acquitter avant de supprimer le salon : on ne peut pas compter sur
+          // une modification du message éphémère une fois le salon effacé.
+          await interaction.update({ content: '⏳ Fermeture et suppression du salon et de ses messages…', components: [] });
+          await service.close(interaction.guild, interaction.channelId, interaction.user.id);
         }
         return;
       }
@@ -143,29 +195,36 @@ export function createInteractionHandler({ config, service, logger = console }) 
       if (interaction.customId === IDS.progress) {
         ensureOpen(ticket);
         await interaction.showModal(progressModal());
+      } else if ([IDS.urgent, IDS.normal].includes(interaction.customId)) {
+        ensureOpen(ticket);
+        await interaction.deferReply(ephemeral);
+        const result = await service.setUrgent(interaction.guild, interaction.channelId, interaction.customId === IDS.urgent, interaction.user.id);
+        const label = result.ticket.urgent ? '🚨 Urgente' : 'Normale';
+        await interaction.editReply({ content: `${result.unchanged ? 'Priorité inchangée' : 'Priorité mise à jour'} : **${label}**.${result.warning ? `\n⚠️ ${result.warning}` : ''}`, allowedMentions: { parse: [] } });
       } else if ([IDS.claim, IDS.waiting, IDS.resolve].includes(interaction.customId)) {
         ensureOpen(ticket);
         await interaction.deferReply(ephemeral);
         const status = interaction.customId === IDS.claim ? 'claimed' : (interaction.customId === IDS.waiting ? 'waiting' : 'resolved');
         const result = await service.setStatus(interaction.guild, interaction.channelId, status, interaction.user.id);
-        await interaction.editReply({ content: feedback(result), allowedMentions: { parse: [] } });
+        if (status === 'claimed') await reportClaim(interaction, result);
+        else await interaction.editReply({ content: feedback(result), allowedMentions: { parse: [] } });
       } else if (interaction.customId === IDS.reopen) {
         if (ticket.status !== 'closed') throw new UserError('Ce ticket n’est pas fermé.');
         await interaction.deferReply(ephemeral);
         const result = await service.reopen(interaction.guild, interaction.channelId, interaction.user.id);
         await interaction.editReply({ content: `✅ Ticket rouvert et remis en attente. Le nom du salon sera synchronisé dès que Discord le permettra.${result.warning ? `\n⚠️ ${result.warning}` : ''}` });
       } else if (interaction.customId === IDS.delete || interaction.customId === IDS.deleteConfirm) {
-        if (ticket.status !== 'closed') throw new UserError('Fermez le ticket avant de le supprimer.');
+        if (ticket.status !== 'closed') throw new UserError('Utilisez Fermer pour supprimer ce ticket.');
         if (interaction.customId === IDS.delete) {
           await interaction.reply({
-            content: 'Supprimer définitivement ce salon et tous ses messages ? Cette action est irréversible.',
+            content: 'Supprimer définitivement ce salon et tous ses messages ? Cette action est irréversible. Aucune transcription automatique n’est enregistrée.',
             components: [confirmationRow(IDS.deleteConfirm)], ...ephemeral,
           });
         } else {
           // Confirmer avant la suppression : une fois le salon supprimé, il n'est
           // plus toujours possible de modifier le message éphémère.
           await interaction.update({ content: '⏳ Suppression du salon et de ses messages…', components: [] });
-          await service.delete(interaction.guild, interaction.channelId);
+          await service.delete(interaction.guild, interaction.channelId, interaction.user.id);
         }
       }
     } catch (error) {

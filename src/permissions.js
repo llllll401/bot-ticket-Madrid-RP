@@ -9,8 +9,8 @@ export const STAFF_ACCESS = Object.freeze({
   AttachFiles: true,
 });
 
-// Ces permissions sont nécessaires à la création, à la gestion et à la fermeture
-// en lecture seule, y compris lorsque des fils existent dans le ticket.
+// Ces permissions couvrent la création, le suivi, la suppression des salons et
+// la restauration des permissions des anciens tickets fermés, y compris leurs fils.
 export const REQUIRED_BOT_PERMISSIONS = Object.freeze({
   'Voir les salons': PermissionFlagsBits.ViewChannel,
   'Gérer les salons': PermissionFlagsBits.ManageChannels,

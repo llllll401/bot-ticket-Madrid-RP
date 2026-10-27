@@ -142,18 +142,24 @@ test('les permissions du salon excluent @everyone et distinguent rôles et membr
 test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   assert.equal(commands[0].toJSON().name, 'panneau-tickets');
   assert.equal(commands[0].toJSON().default_member_permissions, PermissionFlagsBits.ManageGuild.toString());
-  assert.equal(commands[2].toJSON().name, 'tickets');
-  assert.deepEqual(commands[2].toJSON().options.map((option) => option.name), ['statut', 'categorie', 'responsable', 'mes_tickets']);
+  assert.deepEqual(commands.map((command) => command.toJSON().name), ['panneau-tickets', 'ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'tickets']);
+  const overview = commands.find((command) => command.toJSON().name === 'tickets').toJSON();
+  assert.deepEqual(overview.options.map((option) => option.name), ['statut', 'categorie', 'responsable', 'mes_tickets', 'sans_responsable', 'priorite']);
   const button = (panel, id) => panel.components.flatMap((row) => row.toJSON().components).find((item) => item.custom_id === id);
   const open = ticketPanel(record());
   assert.equal(open.embeds[0].toJSON().fields[1].value, '🔴 En attente');
-  assert.equal(button(open, IDS.claim).disabled, false);
-  assert.equal(button(open, IDS.waiting).disabled, false);
-  assert.equal(button(open, IDS.reopen).disabled, true);
+  assert.equal(Boolean(button(open, IDS.claim).disabled), false);
+  assert.equal(Boolean(button(open, IDS.waiting).disabled), false);
+  assert.ok(button(open, IDS.urgent));
+  assert.equal(button(open, IDS.reopen), undefined);
+  const urgent = ticketPanel({ ...record(), urgent: true });
+  assert.ok(button(urgent, IDS.normal));
+  assert.match(urgent.embeds[0].toJSON().fields[3].value, /Urgente/);
   const closed = ticketPanel({ ...record(), status: 'closed' });
-  assert.equal(button(closed, IDS.claim).disabled, true);
-  assert.equal(button(closed, IDS.waiting).disabled, true);
-  assert.equal(button(closed, IDS.reopen).disabled, false);
+  assert.equal(button(closed, IDS.claim), undefined);
+  assert.equal(button(closed, IDS.waiting), undefined);
+  assert.equal(Boolean(button(closed, IDS.reopen).disabled), false);
+  assert.equal(Boolean(button(closed, IDS.delete).disabled), false);
 });
 
 test('le registre persiste, protège ses copies et ne mélange pas les serveurs', (t) => {
@@ -253,7 +259,7 @@ test('l’enregistrement des commandes ne supprime pas les autres commandes du b
   } };
   await registerGuildCommands(guild, commands);
   assert.deepEqual(edited, [['1', 'panneau-tickets']]);
-  assert.deepEqual(created, ['ticket-panneau', 'tickets']);
+  assert.deepEqual(created, ['ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'tickets']);
   assert.equal(existing.get('2').name, 'autre-commande');
 });
 
@@ -338,4 +344,23 @@ test('les limites de salons sont reconnues sur les erreurs réelles de discord.j
   const other = new DiscordAPIError({ ...raw, errors: { parent_id: { _errors: [{ code: 'OTHER' }] } } }, 50035, 400, 'POST', '/guilds/1/channels', {});
   assert.equal(isFullCategory(other), false);
   assert.equal(isServerChannelLimit(new DiscordAPIError({ code: 30013, message: 'Maximum channels' }, 30013, 400, 'POST', '/guilds/1/channels', {})), true);
+});
+
+test('le registre accepte les anciennes données mais refuse une priorité ou un journal de suppression corrompus', (t) => {
+  const file = path.join(tempDir(t), 'tickets.json');
+  const store = new TicketStore(file, GUILD);
+  store.allocateNumber();
+  const legacy = record();
+  store.save(legacy);
+  assert.equal(new TicketStore(file, GUILD).get(CHANNEL).urgent, undefined);
+  for (const invalid of [
+    { urgent: 'urgent' },
+    { assignmentRevision: -1 },
+    { assignmentRevision: Number.MAX_SAFE_INTEGER + 1 },
+    { pendingDeletion: { actorId: 'pas-un-id', requestedAt: '2026-01-01T00:00:00.000Z' } },
+    { pendingDeletion: { actorId: OWNER, requestedAt: 'pas-une-date' } },
+    { status: 'deleted', pendingDeletion: { actorId: OWNER, requestedAt: '2026-01-01T00:00:00.000Z' } },
+  ]) assert.throws(() => store.save({ ...legacy, ...invalid }), /ticket invalide/);
+  assert.equal(store.get(CHANNEL).status, 'waiting');
+  assert.equal(store.findOpen(OWNER, 'plainte').channelId, CHANNEL);
 });
