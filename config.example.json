@@ -1,0 +1,22 @@
+{
+  "token": "",
+  "serveurId": "",
+  "rolesStaff": [],
+  "categories": {
+    "plainte": "",
+    "question": "",
+    "rc_staff": "",
+    "demande_unban": "",
+    "fondation": "",
+    "partenariat": ""
+  },
+  "rolesStaffParCategorie": {
+    "plainte": [],
+    "question": [],
+    "rc_staff": [],
+    "demande_unban": [],
+    "fondation": [],
+    "partenariat": []
+  },
+  "fichierDonnees": "./data/tickets.json"
+}

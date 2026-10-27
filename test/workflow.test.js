@@ -1,0 +1,839 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { ChannelType, PermissionFlagsBits, PermissionsBitField, RateLimitError } from 'discord.js';
+import { loadConfig } from '../src/config.js';
+import { createInteractionHandler } from '../src/interactions.js';
+import { closedOwnerWrites, snapshotOwnerWrites } from '../src/permissions.js';
+import { TicketStore } from '../src/store.js';
+import { TicketService } from '../src/ticket-service.js';
+import { IDS } from '../src/ui.js';
+
+const GUILD = '100000000000000001';
+const OTHER_GUILD = '100000000000000002';
+const OWNER = '110000000000000001';
+const STRANGER = '110000000000000002';
+const STAFF = '110000000000000003';
+const BOT = '110000000000000004';
+const ROLE = '200000000000000001';
+const SPECIAL_ROLE = '200000000000000002';
+const NEW_ROLE = '200000000000000003';
+const PARENT = '300000000000000001';
+const CATEGORIES = Object.freeze({
+  plainte: PARENT,
+  question: '300000000000000002',
+  rc_staff: '300000000000000003',
+  demande_unban: '300000000000000004',
+  fondation: '300000000000000005',
+  partenariat: '300000000000000006',
+});
+const silentLogger = { error() {} };
+let channelCounter = 400000000000000000n;
+let messageCounter = 500000000000000000n;
+const nextChannel = () => String(++channelCounter);
+const nextMessage = () => String(++messageCounter);
+const apiError = (code) => Object.assign(new Error(`Discord ${code}`), { code });
+
+class FakeChannel {
+  constructor(guild, options = {}) {
+    this.guild = guild;
+    this.guildId = guild.id;
+    this.id = options.id ?? nextChannel();
+    this.name = options.name ?? 'tickets';
+    this.type = options.type ?? ChannelType.GuildText;
+    this.parentId = options.parent ?? null;
+    this.sent = [];
+    this.renameAttempts = [];
+    this.messageMap = new Map();
+    this.messages = {
+      fetch: async (id) => {
+        const message = this.messageMap.get(id);
+        if (!message) throw apiError(10008);
+        return message;
+      },
+    };
+    const cache = new Map();
+    for (const overwrite of options.permissionOverwrites ?? []) {
+      cache.set(overwrite.id, {
+        allow: new PermissionsBitField(overwrite.allow ?? []),
+        deny: new PermissionsBitField(overwrite.deny ?? []),
+      });
+    }
+    this.permissionOverwrites = {
+      cache,
+      edit: async (id, values) => {
+        if (this.failPermissionEdit) throw new Error('permission refusée');
+        const current = cache.get(id) ?? { allow: new PermissionsBitField(), deny: new PermissionsBitField() };
+        for (const [name, value] of Object.entries(values)) {
+          const bit = PermissionFlagsBits[name];
+          current.allow.remove(bit);
+          current.deny.remove(bit);
+          if (value === true) current.allow.add(bit);
+          if (value === false) current.deny.add(bit);
+        }
+        cache.set(id, current);
+        return this;
+      },
+      delete: async (id) => { cache.delete(id); return this; },
+    };
+  }
+
+  async send(payload) {
+    if (this.failSend) throw new Error('envoi impossible');
+    const message = {
+      id: nextMessage(),
+      url: `https://discord.com/channels/${this.guildId}/${this.id}/${messageCounter}`,
+      payload,
+      failEdit: false,
+      edit: async (next) => {
+        if (message.failEdit) throw new Error('modification impossible');
+        message.payload = next;
+        return message;
+      },
+    };
+    this.sent.push(message);
+    this.messageMap.set(message.id, message);
+    return message;
+  }
+
+  async setName(name) {
+    this.renameAttempts.push(name);
+    if (this.rateLimitDelay) {
+      throw new RateLimitError({ route: '/channels/:id', method: 'PATCH', retryAfter: this.rateLimitDelay, sublimitTimeout: this.rateLimitDelay });
+    }
+    if (this.failNextRename) {
+      this.failNextRename = false;
+      throw new Error('renommage impossible');
+    }
+    if (this.renameGate) {
+      const gate = this.renameGate;
+      this.renameGate = null;
+      this.onRenameStart?.();
+      await gate;
+    }
+    this.name = name;
+    return this;
+  }
+
+  async delete() {
+    if (this.failDelete) throw new Error('suppression impossible');
+    this.deleted = true;
+    this.guild.channelMap.delete(this.id);
+    return this;
+  }
+}
+
+function makeGuild() {
+  const guild = { id: GUILD, channelMap: new Map(), createCount: 0 };
+  guild.channels = {
+    create: async (options) => {
+      guild.createCount++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const channel = new FakeChannel(guild, options);
+      guild.channelMap.set(channel.id, channel);
+      return channel;
+    },
+    fetch: async (id) => {
+      const channel = guild.channelMap.get(id);
+      if (!channel) throw apiError(10003);
+      return channel;
+    },
+  };
+  return guild;
+}
+
+function interaction(guild, options = {}) {
+  const kind = options.kind ?? 'button';
+  const channel = options.channel ?? new FakeChannel(guild, { name: 'accueil' });
+  const roles = new Set(options.roles ?? []);
+  const item = {
+    guild,
+    guildId: options.guildId ?? guild.id,
+    channel,
+    channelId: channel.id,
+    user: { id: options.userId ?? OWNER, username: options.username ?? 'Élodie', globalName: null },
+    member: { roles: { cache: roles } },
+    memberPermissions: new PermissionsBitField(options.permissions ?? []),
+    customId: options.customId,
+    commandName: options.commandName,
+    values: options.values,
+    fields: { getTextInputValue: () => options.detail },
+    deferred: false,
+    replied: false,
+    response: null,
+    modal: null,
+    isChatInputCommand: () => kind === 'command',
+    isStringSelectMenu: () => kind === 'select',
+    isButton: () => kind === 'button',
+    isModalSubmit: () => kind === 'modal',
+    async reply(payload) { this.replied = true; this.response = payload; },
+    async deferReply(payload) { this.deferred = true; this.deferOptions = payload; },
+    async editReply(payload) { this.response = { ...this.response, ...payload }; },
+    async deferUpdate() { this.deferred = true; },
+    async update(payload) { this.replied = true; this.response = payload; },
+    async showModal(modal) { this.replied = true; this.modal = modal.toJSON(); },
+  };
+  return item;
+}
+
+function harness(t, overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'madrid-tickets-flow-'));
+  let service;
+  t.after(() => { service?.stop(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const rawConfig = {
+    token: 'fake-token', serveurId: GUILD, rolesStaff: [ROLE],
+    categories: { ...CATEGORIES }, rolesStaffParCategorie: {}, ...overrides,
+  };
+  const config = loadConfig(rawConfig, dir);
+  const store = new TicketStore(config.dataFile, GUILD);
+  const guild = makeGuild();
+  service = new TicketService({ config, store, botUserId: BOT, logger: silentLogger });
+  const handle = createInteractionHandler({ config, service, logger: silentLogger });
+  return { config, store, guild, service, handle, rawConfig };
+}
+
+async function openTicket(h, type = 'plainte', userId = OWNER) {
+  const item = interaction(h.guild, { kind: 'select', customId: IDS.open, values: [type], userId });
+  await h.handle(item);
+  const ticket = h.store.findOpen(userId, type);
+  return { item, ticket, channel: ticket ? h.guild.channelMap.get(ticket.channelId) : null };
+}
+
+async function press(h, channel, customId, options = {}) {
+  const item = interaction(h.guild, { channel, customId, ...options });
+  await h.handle(item);
+  return item;
+}
+
+function permission(channel, userId, name) {
+  const overwrite = channel.permissionOverwrites.cache.get(userId);
+  const bit = PermissionFlagsBits[name];
+  if (overwrite?.allow.has(bit, false)) return true;
+  if (overwrite?.deny.has(bit, false)) return false;
+  return null;
+}
+
+async function waitUntil(predicate, timeout = 1500) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Délai dépassé pendant le test.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function waitForName(store, channel) {
+  await waitUntil(() => !store.get(channel.id)?.renamePending);
+}
+
+test('serveur unique et installation du panneau protégée', async (t) => {
+  const h = harness(t);
+  const outsider = interaction(h.guild, { kind: 'select', guildId: OTHER_GUILD, customId: IDS.open, values: ['plainte'] });
+  await h.handle(outsider);
+  assert.equal(outsider.response, null);
+  assert.equal(h.guild.createCount, 0);
+
+  const panelChannel = new FakeChannel(h.guild);
+  const denied = interaction(h.guild, { kind: 'command', channel: panelChannel, commandName: 'panneau-tickets' });
+  await h.handle(denied);
+  assert.match(denied.response.content, /Gérer le serveur/);
+  assert.equal(panelChannel.sent.length, 0);
+  const allowed = interaction(h.guild, { kind: 'command', channel: panelChannel, commandName: 'panneau-tickets', permissions: [PermissionFlagsBits.ManageGuild] });
+  await h.handle(allowed);
+  assert.match(allowed.response.content, /installé/);
+  assert.equal(panelChannel.sent[0].payload.components[0].toJSON().components[0].options.length, 6);
+});
+
+test('les ouvertures simultanées ne créent qu’un salon privé par utilisateur et par type', async (t) => {
+  const h = harness(t);
+  const first = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
+  const second = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
+  await Promise.all([h.handle(first), h.handle(second)]);
+  assert.ok(first.deferred && second.deferred);
+  assert.equal(h.guild.createCount, 1);
+  assert.match(first.response.content, /créé/);
+  assert.match(second.response.content, /déjà un ticket/);
+  const ticket = h.store.findOpen(OWNER, 'plainte');
+  const channel = h.guild.channelMap.get(ticket.channelId);
+  assert.equal(channel.parentId, PARENT);
+  assert.equal(permission(channel, GUILD, 'ViewChannel'), false);
+  assert.equal(permission(channel, OWNER, 'ViewChannel'), true);
+  assert.equal(permission(channel, ROLE, 'ViewChannel'), true);
+  assert.equal(permission(channel, BOT, 'ViewChannel'), true);
+  assert.equal(channel.permissionOverwrites.cache.has(STRANGER), false);
+  const question = await openTicket(h, 'question');
+  assert.ok(question.ticket);
+  assert.equal(question.channel.parentId, CATEGORIES.question);
+  assert.equal(h.guild.createCount, 2);
+  const invalid = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['toString'] });
+  await h.handle(invalid);
+  assert.match(invalid.response.content, /catégorie valide/);
+  assert.equal(h.guild.createCount, 2);
+});
+
+test('prise en charge, étape, traitement, fermeture et réouverture', async (t) => {
+  const h = harness(t);
+  const { channel, ticket } = await openTicket(h);
+  const denied = await press(h, channel, IDS.claim, { userId: STRANGER });
+  assert.match(denied.response.content, /Seule l’équipe/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+
+  const claim = await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  assert.match(claim.response.content, /Pris en charge/);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🟠-pris-en-charge-/u);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+
+  const modalButton = await press(h, channel, IDS.progress, { userId: STAFF, roles: [ROLE] });
+  assert.equal(modalButton.modal.custom_id, IDS.progressSubmit);
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: IDS.progressSubmit, userId: STAFF, roles: [ROLE], detail: 'Vérification des preuves' });
+  await h.handle(modal);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🟡-en-cours-de-verification-des-preuves-/u);
+  assert.equal(h.store.get(channel.id).progressDetail, 'Vérification des preuves');
+  const panel = channel.messageMap.get(ticket.panelMessageId);
+  assert.match(panel.payload.embeds[0].toJSON().fields[1].value, /En cours de Vérification des preuves/);
+
+  await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🟢-traite-/u);
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  const duplicate = await openTicket(h);
+  assert.match(duplicate.item.response.content, /déjà un ticket/);
+
+  await channel.permissionOverwrites.edit(OWNER, { SendMessagesInThreads: true, CreatePublicThreads: false, CreatePrivateThreads: null });
+  const confirmation = await press(h, channel, IDS.close, { userId: OWNER });
+  assert.match(confirmation.response.content, /lecture|lire/);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
+  assert.equal(confirmation.response.components[0].toJSON().components[0].custom_id, IDS.closeConfirm);
+  await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'closed');
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^⚫-ferme-/u);
+  for (const name of ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads']) {
+    assert.equal(permission(channel, OWNER, name), false);
+  }
+  assert.equal(permission(channel, OWNER, 'ViewChannel'), true);
+
+  const ownerReopen = await press(h, channel, IDS.reopen, { userId: OWNER });
+  assert.match(ownerReopen.response.content, /Seule l’équipe/);
+  const staffReopen = await press(h, channel, IDS.reopen, { userId: STAFF, roles: [ROLE] });
+  assert.match(staffReopen.response.content, /rouvert/);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🔴-attente-/u);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  assert.equal(permission(channel, OWNER, 'SendMessages'), true);
+  assert.equal(permission(channel, OWNER, 'SendMessagesInThreads'), true);
+  assert.equal(permission(channel, OWNER, 'CreatePublicThreads'), false);
+  assert.equal(permission(channel, OWNER, 'CreatePrivateThreads'), null);
+});
+
+test('réouverture sans doublon et suppression définitive uniquement par le staff', async (t) => {
+  const h = harness(t);
+  const old = await openTicket(h);
+  await press(h, old.channel, IDS.closeConfirm, { userId: OWNER });
+  const newer = await openTicket(h);
+  assert.notEqual(newer.channel.id, old.channel.id);
+  const reopen = await press(h, old.channel, IDS.reopen, { userId: STAFF, roles: [ROLE] });
+  assert.match(reopen.response.content, /Un autre ticket.*déjà ouvert/);
+  assert.equal(h.store.get(old.channel.id).status, 'closed');
+  const openDelete = await press(h, newer.channel, IDS.deleteConfirm, { userId: STAFF, roles: [ROLE] });
+  assert.match(openDelete.response.content, /Fermez le ticket/);
+  const unauthorized = await press(h, old.channel, IDS.deleteConfirm, { userId: OWNER });
+  assert.match(unauthorized.response.content, /Seule l’équipe/);
+  const ask = await press(h, old.channel, IDS.delete, { userId: STAFF, roles: [ROLE] });
+  assert.match(ask.response.content, /irréversible/);
+  assert.ok(h.guild.channelMap.has(old.channel.id));
+  await press(h, old.channel, IDS.deleteConfirm, { userId: STAFF, roles: [ROLE] });
+  assert.equal(h.guild.channelMap.has(old.channel.id), false);
+  assert.equal(h.store.get(old.channel.id).status, 'deleted');
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, newer.channel.id);
+});
+
+test('les tickets et boutons survivent au redémarrage et les salons supprimés sont détectés', async (t) => {
+  const h = harness(t);
+  const first = await openTicket(h);
+  h.service.stop();
+  const reloadedStore = new TicketStore(h.config.dataFile, GUILD);
+  const reloadedService = new TicketService({ config: h.config, store: reloadedStore, botUserId: BOT, logger: silentLogger });
+  t.after(() => reloadedService.stop());
+  const reloadedHandler = createInteractionHandler({ config: h.config, service: reloadedService, logger: silentLogger });
+  const claim = interaction(h.guild, { channel: first.channel, customId: IDS.claim, userId: STAFF, roles: [ROLE] });
+  await reloadedHandler(claim);
+  assert.equal(reloadedStore.get(first.channel.id).status, 'claimed');
+
+  // Simule un salon supprimé pendant que le bot était hors ligne.
+  h.guild.channelMap.delete(first.channel.id);
+  const select = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
+  await reloadedHandler(select);
+  assert.match(select.response.content, /créé/);
+  assert.equal(reloadedStore.get(first.channel.id).status, 'deleted');
+  const replacement = reloadedStore.findOpen(OWNER, 'plainte');
+  assert.notEqual(replacement.channelId, first.channel.id);
+  await reloadedService.channelDeleted({ id: replacement.channelId, guildId: OTHER_GUILD });
+  assert.ok(reloadedStore.findOpen(OWNER, 'plainte'));
+  await reloadedService.channelDeleted(h.guild.channelMap.get(replacement.channelId));
+  assert.equal(reloadedStore.get(replacement.channelId).status, 'deleted');
+});
+
+test('les rôles spécifiques remplacent les rôles généraux et sont synchronisés après changement', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h, 'rc_staff');
+  assert.equal(permission(channel, SPECIAL_ROLE, 'ViewChannel'), true);
+  assert.equal(channel.permissionOverwrites.cache.has(ROLE), false);
+  const wrongStaff = await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  assert.match(wrongStaff.response.content, /Seule l’équipe/);
+  const allowed = await press(h, channel, IDS.claim, { userId: STAFF, roles: [SPECIAL_ROLE] });
+  assert.match(allowed.response.content, /Pris en charge/);
+  await waitForName(h.store, channel);
+  h.service.stop();
+
+  const newConfig = loadConfig({ ...h.rawConfig, rolesStaffParCategorie: { ...h.rawConfig.rolesStaffParCategorie, rc_staff: [NEW_ROLE] } }, path.dirname(path.dirname(h.config.dataFile)));
+  const restarted = new TicketService({ config: newConfig, store: h.store, botUserId: BOT, logger: silentLogger });
+  t.after(() => restarted.stop());
+  await restarted.syncConfiguredRoles(h.guild);
+  assert.equal(channel.permissionOverwrites.cache.has(SPECIAL_ROLE), false);
+  assert.equal(permission(channel, NEW_ROLE, 'ViewChannel'), true);
+  assert.deepEqual(h.store.get(channel.id).staffRoleIds, [NEW_ROLE]);
+  const panel = channel.messageMap.get(h.store.get(channel.id).panelMessageId);
+  assert.ok(panel.payload.content.includes(NEW_ROLE));
+  assert.ok(!panel.payload.content.includes(SPECIAL_ROLE));
+  const newHandler = createInteractionHandler({ config: newConfig, service: restarted, logger: silentLogger });
+  const oldStaff = interaction(h.guild, { channel, customId: IDS.resolve, userId: STAFF, roles: [SPECIAL_ROLE] });
+  await newHandler(oldStaff);
+  assert.match(oldStaff.response.content, /Seule l’équipe/);
+  const newStaff = interaction(h.guild, { channel, customId: IDS.resolve, userId: STAFF, roles: [NEW_ROLE] });
+  await newHandler(newStaff);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
+});
+
+test('un échec de renommage ne bloque pas la fermeture et peut être relancé', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.failNextRename = true;
+  const response = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.match(response.response.content, /Ticket fermé/);
+  assert.equal(h.store.get(channel.id).status, 'closed');
+  assert.equal(permission(channel, OWNER, 'SendMessages'), false);
+  await waitUntil(() => Boolean(h.service.names.jobs.get(channel.id)?.timer));
+  assert.equal(h.store.get(channel.id).renamePending, true);
+  const repair = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
+  await h.handle(repair);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^⚫-ferme-/u);
+});
+
+test('un panneau manquant ou impossible à modifier ne fait pas perdre le statut', async (t) => {
+  const h = harness(t);
+  const { channel, ticket } = await openTicket(h);
+  const panel = channel.messageMap.get(ticket.panelMessageId);
+  panel.failEdit = true;
+  const result = await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  assert.match(result.response.content, /panneau n’a pas pu être actualisé/);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🟢-traite-/u);
+
+  channel.messageMap.delete(ticket.panelMessageId);
+  channel.name = 'nom-modifie';
+  const repair = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
+  await h.handle(repair);
+  assert.match(repair.response.content, /Panneau rétabli/);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🟢-traite-/u);
+  assert.notEqual(h.store.get(channel.id).panelMessageId, ticket.panelMessageId);
+  assert.ok(channel.messageMap.has(h.store.get(channel.id).panelMessageId));
+});
+
+test('une étape invalide est refusée sans changer le statut', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: IDS.progressSubmit, userId: STAFF, roles: [ROLE], detail: '😇💜' });
+  await h.handle(modal);
+  assert.match(modal.response.content, /lettre ou un chiffre/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+});
+
+test('l’ouverture et la réouverture concurrentes respectent la limite par type', async (t) => {
+  const h = harness(t);
+  const old = await openTicket(h);
+  await press(h, old.channel, IDS.closeConfirm, { userId: OWNER });
+  const select = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
+  const reopen = interaction(h.guild, { channel: old.channel, customId: IDS.reopen, userId: STAFF, roles: [ROLE] });
+  await Promise.all([h.handle(select), h.handle(reopen)]);
+  assert.match(select.response.content, /créé/);
+  assert.match(reopen.response.content, /déjà ouvert/);
+  assert.equal(h.store.get(old.channel.id).status, 'closed');
+  assert.notEqual(h.store.findOpen(OWNER, 'plainte').channelId, old.channel.id);
+});
+
+test('un échec de sauvegarde annule la fermeture et préserve les droits', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const save = h.store.save.bind(h.store);
+  h.store.save = (ticket) => {
+    if (ticket.status === 'closed') throw new Error('disque indisponible');
+    return save(ticket);
+  };
+  const response = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.match(response.response.content, /Une erreur/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.match(channel.name, /^🔴-attente-/u);
+  assert.equal(permission(channel, OWNER, 'SendMessages'), true);
+});
+
+test('un changement de rôles interrompu est retenté sans conserver les anciens accès', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h, 'rc_staff');
+  const newConfig = loadConfig({ ...h.rawConfig, rolesStaffParCategorie: { ...h.rawConfig.rolesStaffParCategorie, rc_staff: [NEW_ROLE] } });
+  const service = new TicketService({ config: newConfig, store: h.store, botUserId: BOT, logger: silentLogger });
+  channel.failPermissionEdit = true;
+  await assert.rejects(service.syncConfiguredRoles(h.guild), /permission refusée/);
+  assert.equal(channel.permissionOverwrites.cache.has(SPECIAL_ROLE), false);
+  assert.deepEqual(h.store.get(channel.id).staffRoleIds, [SPECIAL_ROLE]);
+  channel.failPermissionEdit = false;
+  await service.syncConfiguredRoles(h.guild);
+  assert.deepEqual(h.store.get(channel.id).staffRoleIds, [NEW_ROLE]);
+  assert.equal(permission(channel, NEW_ROLE, 'ViewChannel'), true);
+});
+
+test('un administrateur peut gérer un ticket même sans rôle staff', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h, 'rc_staff');
+  const admin = await press(h, channel, IDS.resolve, { userId: STRANGER, permissions: [PermissionFlagsBits.Administrator] });
+  assert.match(admin.response.content, /Traité/);
+  assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
+});
+
+test('revenir à la configuration précédente répare aussi une synchronisation interrompue', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h, 'rc_staff');
+  const changed = loadConfig({ ...h.rawConfig, rolesStaffParCategorie: { ...h.rawConfig.rolesStaffParCategorie, rc_staff: [NEW_ROLE] } });
+  const failed = new TicketService({ config: changed, store: h.store, botUserId: BOT, logger: silentLogger });
+  channel.failPermissionEdit = true;
+  await assert.rejects(failed.syncConfiguredRoles(h.guild), /permission refusée/);
+  assert.deepEqual(h.store.get(channel.id).roleSyncPending, [SPECIAL_ROLE, NEW_ROLE]);
+  assert.equal(channel.permissionOverwrites.cache.has(SPECIAL_ROLE), false);
+  channel.failPermissionEdit = false;
+  const reverted = new TicketService({ config: h.config, store: h.store, botUserId: BOT, logger: silentLogger });
+  await reverted.syncConfiguredRoles(h.guild);
+  assert.equal(permission(channel, SPECIAL_ROLE, 'ViewChannel'), true);
+  assert.equal(channel.permissionOverwrites.cache.has(NEW_ROLE), false);
+  assert.equal(h.store.get(channel.id).roleSyncPending, null);
+});
+
+test('un redémarrage restaure le nom et les permissions d’une transition interrompue', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const ticket = h.store.get(channel.id);
+  const previousWrites = snapshotOwnerWrites(channel, OWNER);
+  h.store.save({ ...ticket, pendingTransition: { ownerWrites: previousWrites } });
+  // Simule un arrêt après la mise en lecture seule et le renommage, avant la sauvegarde finale.
+  await channel.permissionOverwrites.edit(OWNER, closedOwnerWrites());
+  channel.name = '⚫-ferme-plainte-elodie-0001';
+  h.service.stop();
+  const restartedStore = new TicketStore(h.config.dataFile, GUILD);
+  const restarted = new TicketService({ config: h.config, store: restartedStore, botUserId: BOT, logger: silentLogger });
+  t.after(() => restarted.stop());
+  await restarted.recoverPendingTransitions(h.guild);
+  await waitForName(restartedStore, channel);
+  assert.equal(restartedStore.get(channel.id).status, 'waiting');
+  assert.equal(restartedStore.get(channel.id).pendingTransition, null);
+  assert.match(channel.name, /^🔴-attente-/u);
+  assert.equal(permission(channel, OWNER, 'SendMessages'), true);
+  assert.equal(permission(channel, OWNER, 'SendMessagesInThreads'), null);
+});
+
+test('si la restauration échoue, le journal reste présent pour le prochain démarrage', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const ticket = h.store.get(channel.id);
+  h.store.save({ ...ticket, pendingTransition: { ownerWrites: snapshotOwnerWrites(channel, OWNER) } });
+  await channel.permissionOverwrites.edit(OWNER, closedOwnerWrites());
+  channel.failPermissionEdit = true;
+  await assert.rejects(h.service.recoverPendingTransitions(h.guild), /permission refusée/);
+  assert.ok(h.store.get(channel.id).pendingTransition);
+  channel.failPermissionEdit = false;
+  await h.service.recoverPendingTransitions(h.guild);
+  assert.equal(h.store.get(channel.id).pendingTransition, null);
+  assert.equal(permission(channel, OWNER, 'SendMessages'), true);
+});
+
+test('la limite Discord ne bloque pas le suivi et seul le dernier nom est appliqué', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.rateLimitDelay = 200;
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await waitUntil(() => h.service.names.jobs.get(channel.id)?.retryReason === 'rate-limit');
+  assert.match(channel.name, /^🔴-attente-/u);
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: IDS.progressSubmit, userId: STAFF, roles: [ROLE], detail: 'enquête' });
+  await h.handle(modal);
+  await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  const close = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.match(close.response.content, /Ticket fermé/);
+  assert.equal(h.store.get(channel.id).status, 'closed');
+  assert.equal(permission(channel, OWNER, 'SendMessages'), false);
+  assert.equal(channel.renameAttempts.length, 1);
+  const panel = channel.messageMap.get(h.store.get(channel.id).panelMessageId);
+  assert.match(panel.payload.embeds[0].toJSON().footer.text, /attente de synchronisation/);
+  assert.match(panel.payload.embeds[0].toJSON().fields[1].value, /Fermé/);
+
+  // Une réparation manuelle ne contourne pas le délai retourné par Discord.
+  const repair = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
+  await h.handle(repair);
+  assert.equal(channel.renameAttempts.length, 1);
+  channel.rateLimitDelay = 0;
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^⚫-ferme-/u);
+  assert.equal(channel.renameAttempts.length, 2);
+  assert.match(channel.renameAttempts[1], /^⚫-ferme-/u);
+});
+
+test('un ancien renommage en vol est suivi du dernier statut, sans étapes intermédiaires', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let release;
+  let started;
+  channel.renameGate = new Promise((resolve) => { release = resolve; });
+  const inFlight = new Promise((resolve) => { started = resolve; });
+  channel.onRenameStart = started;
+  t.after(() => release());
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await inFlight;
+  await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'closed');
+  release();
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^⚫-ferme-/u);
+  assert.equal(channel.renameAttempts.length, 2);
+  assert.match(channel.renameAttempts[0], /^🟠-pris-en-charge-/u);
+  assert.match(channel.renameAttempts[1], /^⚫-ferme-/u);
+});
+
+test('un renommage différé est repris après redémarrage', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.rateLimitDelay = 60_000;
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await waitUntil(() => h.service.names.jobs.get(channel.id)?.retryReason === 'rate-limit');
+  assert.equal(h.store.get(channel.id).renamePending, true);
+  h.service.stop();
+  channel.rateLimitDelay = 0;
+  const store = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  service.resumePendingRenames(h.guild);
+  await waitForName(store, channel);
+  assert.match(channel.name, /^🟠-pris-en-charge-/u);
+});
+
+test('chaque type de ticket est créé dans sa catégorie Discord configurée', async (t) => {
+  const h = harness(t);
+  for (const [type, categoryId] of Object.entries(CATEGORIES)) {
+    const result = await openTicket(h, type);
+    assert.ok(result.ticket, `Le ticket ${type} doit être créé.`);
+    assert.equal(result.channel.parentId, categoryId, `Mauvaise catégorie pour ${type}.`);
+  }
+  assert.equal(h.guild.createCount, 6);
+});
+
+test('un ID de catégorie manquant ne crée jamais de salon à la racine', async (t) => {
+  const h = harness(t);
+  delete h.config.categoryIdsByType.question;
+  const result = await openTicket(h, 'question');
+  assert.equal(result.ticket, null);
+  assert.match(result.item.response.content, /Une erreur/);
+  assert.equal(h.guild.createCount, 0);
+});
+
+test('remettre en attente libère le responsable et les actions répétées sont sans effet', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const initialMessages = channel.sent.length;
+  const denied = await press(h, channel, IDS.waiting, { userId: OWNER });
+  assert.match(denied.response.content, /Seule l’équipe/);
+  const alreadyWaiting = await press(h, channel, IDS.waiting, { userId: STAFF, roles: [ROLE] });
+  assert.match(alreadyWaiting.response.content, /Aucun changement/);
+  assert.equal(channel.sent.length, initialMessages);
+
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await waitForName(h.store, channel);
+  const claimed = h.store.get(channel.id);
+  const messageCount = channel.sent.length;
+  const renameCount = channel.renameAttempts.length;
+  const repeat = await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  assert.match(repeat.response.content, /Aucun changement/);
+  assert.equal(channel.sent.length, messageCount);
+  assert.equal(channel.renameAttempts.length, renameCount);
+  assert.equal(h.store.get(channel.id).updatedAt, claimed.updatedAt);
+
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: IDS.progressSubmit, userId: STAFF, roles: [ROLE], detail: 'vérification' });
+  await h.handle(modal);
+  const waiting = await press(h, channel, IDS.waiting, { userId: STAFF, roles: [ROLE] });
+  assert.match(waiting.response.content, /En attente/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  assert.equal(h.store.get(channel.id).progressDetail, null);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🔴-attente-/u);
+});
+
+test('la maintenance des rôles ne modifie pas l’ancienneté du ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const timestamp = '2024-01-02T12:00:00.000Z';
+  h.store.save({ ...h.store.get(channel.id), updatedAt: timestamp });
+  const config = loadConfig({ ...h.rawConfig, rolesStaff: [NEW_ROLE] });
+  const service = new TicketService({ config, store: h.store, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.syncConfiguredRoles(h.guild);
+  assert.equal(h.store.get(channel.id).updatedAt, timestamp);
+});
+
+test('une catégorie pleine ou la limite du serveur est signalée sans création ailleurs', async (t) => {
+  const h = harness(t);
+  let calls = 0;
+  h.guild.channels.create = async (options) => {
+    calls++;
+    assert.equal(options.parent, CATEGORIES.plainte);
+    throw Object.assign(new Error('Invalid Form Body'), {
+      code: 50035,
+      rawError: { errors: { parent_id: { _errors: [{ code: 'CHANNEL_PARENT_MAX_CHANNELS' }] } } },
+    });
+  };
+  const fullCategory = await openTicket(h);
+  assert.equal(fullCategory.ticket, null);
+  assert.match(fullCategory.item.response.content, /catégorie Plainte est pleine/);
+  assert.equal(calls, 1);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+
+  h.guild.channels.create = async () => { throw Object.assign(new Error('limite serveur'), { code: 30013 }); };
+  const fullServer = await openTicket(h);
+  assert.match(fullServer.item.response.content, /limite de salons du serveur/);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+
+  // D’autres erreurs 50035 ne doivent pas être présentées comme une catégorie pleine.
+  h.guild.channels.create = async () => {
+    throw Object.assign(new Error('erreur différente'), {
+      code: 50035, rawError: { errors: { parent_id: { _errors: [{ code: 'UNKNOWN_CATEGORY' }] } } },
+    });
+  };
+  const other = await openTicket(h);
+  assert.match(other.item.response.content, /Une erreur est survenue/);
+  assert.doesNotMatch(other.item.response.content, /catégorie.*pleine/);
+});
+
+test('les anciens panneaux sont mis à niveau sans nouvelles mentions, avec reprise après erreur', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const old = h.store.get(channel.id);
+  assert.ok(old.panelVersion >= 2);
+  delete old.panelVersion;
+  h.store.save(old);
+  const panel = channel.messageMap.get(old.panelMessageId);
+  const messagesBefore = channel.sent.length;
+  panel.failEdit = true;
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.equal(h.store.get(channel.id).panelVersion, undefined);
+  panel.failEdit = false;
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.ok(h.store.get(channel.id).panelVersion >= 2);
+  assert.equal(channel.sent.length, messagesBefore);
+  assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
+  const ids = panel.payload.components.flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
+  assert.ok(ids.includes(IDS.waiting));
+  const version = h.store.get(channel.id).panelVersion;
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.equal(h.store.get(channel.id).panelVersion, version);
+  assert.equal(channel.sent.length, messagesBefore);
+});
+
+test('la mise à niveau d’un panneau et un changement de statut restent sérialisés', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const old = h.store.get(channel.id);
+  delete old.panelVersion;
+  h.store.save(old);
+  const panel = channel.messageMap.get(old.panelMessageId);
+  const edit = panel.edit;
+  let release;
+  let signal;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { signal = resolve; });
+  panel.edit = async (payload) => { signal(); await gate; return edit(payload); };
+  t.after(() => release());
+  const upgrade = h.service.refreshOutdatedPanels(h.guild);
+  await started;
+  const claim = press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await Promise.resolve();
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  release();
+  await Promise.all([upgrade, claim]);
+  await waitForName(h.store, channel);
+  assert.equal(h.store.get(channel.id).status, 'claimed');
+  assert.ok(h.store.get(channel.id).panelVersion >= 2);
+  assert.match(panel.payload.embeds[0].toJSON().fields[1].value, /Pris en charge/);
+});
+
+test('un salon supprimé pendant le renommage libère le registre pour une nouvelle demande', async (t) => {
+  const h = harness(t);
+  const old = await openTicket(h);
+  let release;
+  let signal;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { signal = resolve; });
+  old.channel.setName = async () => { signal(); await gate; throw apiError(10003); };
+  t.after(() => release());
+  await press(h, old.channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await started;
+  h.guild.channelMap.delete(old.channel.id);
+  release();
+  await waitUntil(() => h.store.get(old.channel.id).status === 'deleted');
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(h.service.names.jobs.has(old.channel.id), false);
+  const replacement = await openTicket(h);
+  assert.ok(replacement.ticket);
+  assert.notEqual(replacement.channel.id, old.channel.id);
+});
+
+test('une erreur de stockage à la création supprime le salon sans laisser de doublon', async (t) => {
+  const h = harness(t);
+  const save = h.store.save.bind(h.store);
+  h.store.save = (record) => {
+    if (!h.store.get(record.channelId)) throw new Error('disque plein');
+    return save(record);
+  };
+  const attempt = await openTicket(h);
+  assert.equal(attempt.ticket, null);
+  assert.match(attempt.item.response.content, /Une erreur est survenue/);
+  assert.equal(h.guild.createCount, 1);
+  assert.equal(h.guild.channelMap.size, 0);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  h.store.save = save;
+  const retry = await openTicket(h);
+  assert.ok(retry.ticket);
+  assert.equal(h.guild.channelMap.size, 1);
+});
+
+test('un échec du panneau initial n’efface pas le ticket et peut être réparé', async (t) => {
+  const h = harness(t);
+  const create = h.guild.channels.create;
+  h.guild.channels.create = async (options) => {
+    const channel = await create(options);
+    channel.failSend = true;
+    return channel;
+  };
+  const created = await openTicket(h);
+  assert.ok(created.ticket);
+  assert.match(created.item.response.content, /panneau n’a pas pu être envoyé/);
+  assert.equal(created.ticket.panelMessageId, null);
+  assert.equal(created.ticket.panelVersion, null);
+  created.channel.failSend = false;
+  const repair = interaction(h.guild, { kind: 'command', channel: created.channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
+  await h.handle(repair);
+  assert.match(repair.response.content, /Panneau rétabli/);
+  assert.ok(h.store.get(created.channel.id).panelMessageId);
+  assert.ok(h.store.get(created.channel.id).panelVersion >= 2);
+  await waitForName(h.store, created.channel);
+});
