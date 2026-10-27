@@ -207,6 +207,18 @@ async function press(h, channel, customId, options = {}) {
   return item;
 }
 
+// Simule un ticket fermé avant la mise à jour, avec ses permissions d'origine.
+async function makeLegacyClosed(h, channel) {
+  const ticket = h.store.get(channel.id);
+  const previous = snapshotOwnerWrites(channel, ticket.ownerId);
+  await channel.permissionOverwrites.edit(ticket.ownerId, closedOwnerWrites());
+  const timestamp = new Date().toISOString();
+  return h.store.save({
+    ...ticket, status: 'closed', progressDetail: null, closedAt: timestamp,
+    closedPermissions: previous, updatedAt: timestamp, panelVersion: 2,
+  });
+}
+
 function permission(channel, userId, name) {
   const overwrite = channel.permissionOverwrites.cache.get(userId);
   const bit = PermissionFlagsBits[name];
@@ -272,7 +284,7 @@ test('les ouvertures simultanées ne créent qu’un salon privé par utilisateu
   assert.equal(h.guild.createCount, 2);
 });
 
-test('prise en charge, étape, traitement, fermeture et réouverture', async (t) => {
+test('prise en charge, étape, traitement et fermeture par suppression confirmée', async (t) => {
   const h = harness(t);
   const { channel, ticket } = await openTicket(h);
   const denied = await press(h, channel, IDS.claim, { userId: STRANGER });
@@ -302,20 +314,52 @@ test('prise en charge, étape, traitement, fermeture et réouverture', async (t)
   const duplicate = await openTicket(h);
   assert.match(duplicate.item.response.content, /déjà un ticket/);
 
-  await channel.permissionOverwrites.edit(OWNER, { SendMessagesInThreads: true, CreatePublicThreads: false, CreatePrivateThreads: null });
   const confirmation = await press(h, channel, IDS.close, { userId: OWNER });
-  assert.match(confirmation.response.content, /lecture|lire/);
+  assert.match(confirmation.response.content, /définitivement.*salon.*tous ses messages/);
+  assert.match(confirmation.response.content, /Aucune transcription/);
   assert.equal(h.store.get(channel.id).status, 'resolved');
-  assert.equal(confirmation.response.components[0].toJSON().components[0].custom_id, IDS.closeConfirm);
-  await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.equal(confirmation.response.components[0].toJSON().components[0].custom_id, IDS.closeDeleteConfirm);
+  const stale = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  assert.match(stale.response.content, /ancienne confirmation.*expiré/);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+  const deleting = interaction(h.guild, { channel, customId: IDS.closeDeleteConfirm, userId: OWNER });
+  const deleteChannel = channel.delete.bind(channel);
+  channel.delete = async () => {
+    assert.equal(deleting.replied, true, 'L’interaction doit être acquittée avant la suppression.');
+    assert.equal(h.store.get(channel.id).pendingDeletion.actorId, OWNER);
+    assert.ok(h.store.findOpen(OWNER, 'plainte'), 'Le verrou d’unicité reste actif avant confirmation par Discord.');
+    return deleteChannel();
+  };
+  await h.handle(deleting);
+  assert.match(deleting.response.content, /suppression du salon/);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).closedBy, OWNER);
+  assert.equal(h.store.get(channel.id).deletedBy, OWNER);
+  assert.equal(h.store.get(channel.id).deletionRequestedAt, h.store.get(channel.id).closedAt);
+  assert.ok(h.store.get(channel.id).closedAt);
+  assert.equal(h.store.get(channel.id).pendingDeletion, null);
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  const replacement = await openTicket(h);
+  assert.notEqual(replacement.channel.id, channel.id);
+});
+
+test('les anciens tickets fermés peuvent être rouverts avec leurs permissions précédentes', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await channel.permissionOverwrites.edit(OWNER, { SendMessagesInThreads: true, CreatePublicThreads: false, CreatePrivateThreads: null });
+  const legacy = await makeLegacyClosed(h, channel);
+  h.store.save({ ...legacy, closedBy: STAFF });
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.equal(h.guild.channelMap.has(channel.id), true, 'La migration ne supprime jamais les anciens salons fermés.');
   assert.equal(h.store.get(channel.id).status, 'closed');
-  await waitForName(h.store, channel);
-  assert.match(channel.name, /^⚫-ferme-/u);
+  const upgraded = channel.messageMap.get(h.store.get(channel.id).panelMessageId).payload;
+  assert.deepEqual(upgraded.components.flatMap((row) => row.toJSON().components).map((button) => button.custom_id), [IDS.reopen, IDS.delete]);
   for (const name of ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads']) {
     assert.equal(permission(channel, OWNER, name), false);
   }
   assert.equal(permission(channel, OWNER, 'ViewChannel'), true);
-
   const ownerReopen = await press(h, channel, IDS.reopen, { userId: OWNER });
   assert.match(ownerReopen.response.content, /Seule l’équipe/);
   const staffReopen = await press(h, channel, IDS.reopen, { userId: STAFF, roles: [ROLE] });
@@ -323,23 +367,26 @@ test('prise en charge, étape, traitement, fermeture et réouverture', async (t)
   await waitForName(h.store, channel);
   assert.match(channel.name, /^🔴-attente-/u);
   assert.equal(h.store.get(channel.id).assignedTo, null);
+  assert.equal(h.store.get(channel.id).closedBy, null);
   assert.equal(permission(channel, OWNER, 'SendMessages'), true);
   assert.equal(permission(channel, OWNER, 'SendMessagesInThreads'), true);
   assert.equal(permission(channel, OWNER, 'CreatePublicThreads'), false);
   assert.equal(permission(channel, OWNER, 'CreatePrivateThreads'), null);
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).closedBy, OWNER);
 });
 
-test('réouverture sans doublon et suppression définitive uniquement par le staff', async (t) => {
+test('réouverture sans doublon et suppression explicite des anciens tickets uniquement par le staff', async (t) => {
   const h = harness(t);
   const old = await openTicket(h);
-  await press(h, old.channel, IDS.closeConfirm, { userId: OWNER });
+  await makeLegacyClosed(h, old.channel);
   const newer = await openTicket(h);
   assert.notEqual(newer.channel.id, old.channel.id);
   const reopen = await press(h, old.channel, IDS.reopen, { userId: STAFF, roles: [ROLE] });
   assert.match(reopen.response.content, /Un autre ticket.*déjà ouvert/);
   assert.equal(h.store.get(old.channel.id).status, 'closed');
   const openDelete = await press(h, newer.channel, IDS.deleteConfirm, { userId: STAFF, roles: [ROLE] });
-  assert.match(openDelete.response.content, /Fermez le ticket/);
+  assert.match(openDelete.response.content, /Utilisez Fermer/);
   const unauthorized = await press(h, old.channel, IDS.deleteConfirm, { userId: OWNER });
   assert.match(unauthorized.response.content, /Seule l’équipe/);
   const ask = await press(h, old.channel, IDS.delete, { userId: STAFF, roles: [ROLE] });
@@ -408,20 +455,25 @@ test('les rôles spécifiques remplacent les rôles généraux et sont synchroni
   assert.equal(h.store.get(channel.id).status, 'resolved');
 });
 
-test('un échec de renommage ne bloque pas la fermeture et peut être relancé', async (t) => {
+test('un échec de renommage peut être réparé et ne bloque pas la suppression', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h);
   channel.failNextRename = true;
-  const response = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
-  assert.match(response.response.content, /Ticket fermé/);
-  assert.equal(h.store.get(channel.id).status, 'closed');
-  assert.equal(permission(channel, OWNER, 'SendMessages'), false);
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
   await waitUntil(() => Boolean(h.service.names.jobs.get(channel.id)?.timer));
   assert.equal(h.store.get(channel.id).renamePending, true);
   const repair = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
   await h.handle(repair);
   await waitForName(h.store, channel);
-  assert.match(channel.name, /^⚫-ferme-/u);
+  assert.match(channel.name, /^🟠-pris-en-charge-/u);
+  channel.failNextRename = true;
+  await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  await waitUntil(() => Boolean(h.service.names.jobs.get(channel.id)?.timer));
+  const response = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(response.response.content, /suppression du salon/);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+  assert.equal(h.service.names.jobs.has(channel.id), false);
 });
 
 test('un panneau manquant ou impossible à modifier ne fait pas perdre le statut', async (t) => {
@@ -458,7 +510,7 @@ test('une étape invalide est refusée sans changer le statut', async (t) => {
 test('l’ouverture et la réouverture concurrentes respectent la limite par type', async (t) => {
   const h = harness(t);
   const old = await openTicket(h);
-  await press(h, old.channel, IDS.closeConfirm, { userId: OWNER });
+  await makeLegacyClosed(h, old.channel);
   const select = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
   const reopen = interaction(h.guild, { channel: old.channel, customId: IDS.reopen, userId: STAFF, roles: [ROLE] });
   await Promise.all([h.handle(select), h.handle(reopen)]);
@@ -468,17 +520,19 @@ test('l’ouverture et la réouverture concurrentes respectent la limite par typ
   assert.notEqual(h.store.findOpen(OWNER, 'plainte').channelId, old.channel.id);
 });
 
-test('un échec de sauvegarde annule la fermeture et préserve les droits', async (t) => {
+test('un échec du journal empêche toute suppression et préserve les droits', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h);
   const save = h.store.save.bind(h.store);
   h.store.save = (ticket) => {
-    if (ticket.status === 'closed') throw new Error('disque indisponible');
+    if (ticket.pendingDeletion) throw new Error('disque indisponible');
     return save(ticket);
   };
-  const response = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
+  const response = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
   assert.match(response.response.content, /Une erreur/);
   assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.equal(h.store.get(channel.id).pendingDeletion, null);
+  assert.equal(h.guild.channelMap.has(channel.id), true);
   assert.match(channel.name, /^🔴-attente-/u);
   assert.equal(permission(channel, OWNER, 'SendMessages'), true);
 });
@@ -570,14 +624,11 @@ test('la limite Discord ne bloque pas le suivi et seul le dernier nom est appliq
   const modal = interaction(h.guild, { kind: 'modal', channel, customId: IDS.progressSubmit, userId: STAFF, roles: [ROLE], detail: 'enquête' });
   await h.handle(modal);
   await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
-  const close = await press(h, channel, IDS.closeConfirm, { userId: OWNER });
-  assert.match(close.response.content, /Ticket fermé/);
-  assert.equal(h.store.get(channel.id).status, 'closed');
-  assert.equal(permission(channel, OWNER, 'SendMessages'), false);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
   assert.equal(channel.renameAttempts.length, 1);
   const panel = channel.messageMap.get(h.store.get(channel.id).panelMessageId);
   assert.match(panel.payload.embeds[0].toJSON().footer.text, /attente de synchronisation/);
-  assert.match(panel.payload.embeds[0].toJSON().fields[1].value, /Fermé/);
+  assert.match(panel.payload.embeds[0].toJSON().fields[1].value, /Traité/);
 
   // Une réparation manuelle ne contourne pas le délai retourné par Discord.
   const repair = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-panneau', userId: STAFF, roles: [ROLE] });
@@ -585,9 +636,12 @@ test('la limite Discord ne bloque pas le suivi et seul le dernier nom est appliq
   assert.equal(channel.renameAttempts.length, 1);
   channel.rateLimitDelay = 0;
   await waitForName(h.store, channel);
-  assert.match(channel.name, /^⚫-ferme-/u);
+  assert.match(channel.name, /^🟢-traite-/u);
   assert.equal(channel.renameAttempts.length, 2);
-  assert.match(channel.renameAttempts[1], /^⚫-ferme-/u);
+  assert.match(channel.renameAttempts[1], /^🟢-traite-/u);
+  const close = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(close.response.content, /suppression du salon/);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
 });
 
 test('un ancien renommage en vol est suivi du dernier statut, sans étapes intermédiaires', async (t) => {
@@ -602,14 +656,13 @@ test('un ancien renommage en vol est suivi du dernier statut, sans étapes inter
   await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
   await inFlight;
   await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
-  await press(h, channel, IDS.closeConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).status, 'closed');
+  assert.equal(h.store.get(channel.id).status, 'resolved');
   release();
   await waitForName(h.store, channel);
-  assert.match(channel.name, /^⚫-ferme-/u);
+  assert.match(channel.name, /^🟢-traite-/u);
   assert.equal(channel.renameAttempts.length, 2);
   assert.match(channel.renameAttempts[0], /^🟠-pris-en-charge-/u);
-  assert.match(channel.renameAttempts[1], /^⚫-ferme-/u);
+  assert.match(channel.renameAttempts[1], /^🟢-traite-/u);
 });
 
 test('un renommage différé est repris après redémarrage', async (t) => {
@@ -836,4 +889,382 @@ test('un échec du panneau initial n’efface pas le ticket et peut être répar
   assert.ok(h.store.get(created.channel.id).panelMessageId);
   assert.ok(h.store.get(created.channel.id).panelVersion >= 2);
   await waitForName(h.store, created.channel);
+});
+
+test('/ticket-fermer et les boutons protègent la suppression ; l’annulation ne change rien', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const outsider = await press(h, channel, IDS.close, { userId: STRANGER });
+  assert.match(outsider.response.content, /créateur.*équipe/);
+  const forged = await press(h, channel, IDS.closeDeleteConfirm, { userId: STRANGER });
+  assert.match(forged.response.content, /créateur.*équipe/);
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+  const command = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-fermer', userId: OWNER });
+  await h.handle(command);
+  assert.match(command.response.content, /définitivement.*tous ses messages/);
+  assert.equal(command.response.components[0].toJSON().components[0].custom_id, IDS.closeDeleteConfirm);
+  const cancel = await press(h, channel, IDS.cancel, { userId: OWNER });
+  assert.match(cancel.response.content, /annulée/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  const staffCommand = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-fermer', userId: STAFF, roles: [ROLE] });
+  await h.handle(staffCommand);
+  assert.match(staffCommand.response.content, /Aucune transcription/);
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: STAFF, roles: [ROLE] });
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).closedBy, STAFF);
+});
+
+test('un refus de suppression laisse le ticket ouvert et reprend les renommages en attente', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.rateLimitDelay = 60_000;
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await waitUntil(() => h.service.names.jobs.get(channel.id)?.retryReason === 'rate-limit');
+  const deferredRename = h.service.names.jobs.get(channel.id);
+  channel.failDelete = true;
+  const failed = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(failed.response.content, /n’a pas été supprimé.*permissions/);
+  assert.equal(h.store.get(channel.id).status, 'claimed');
+  assert.equal(h.store.get(channel.id).pendingDeletion, null);
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  assert.equal(permission(channel, OWNER, 'SendMessages'), true);
+  assert.equal(h.service.names.jobs.get(channel.id), deferredRename, 'Le délai Discord est conservé après l’échec.');
+  channel.failDelete = false;
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.service.names.jobs.has(channel.id), false);
+});
+
+test('une suppression réussie malgré une erreur réseau est confirmée par la disparition du salon', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const deleteChannel = channel.delete.bind(channel);
+  channel.delete = async () => { await deleteChannel(); throw new Error('réponse Discord perdue'); };
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).closedBy, OWNER);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+});
+
+test('une suppression incertaine conserve le journal et ne se relance jamais automatiquement', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.failDelete = true;
+  const fetch = h.guild.channels.fetch;
+  let requests = 0;
+  h.guild.channels.fetch = async (...args) => {
+    if (++requests > 1) throw new Error('Discord indisponible');
+    return fetch(...args);
+  };
+  const failed = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(failed.response.content, /Impossible de vérifier la suppression/);
+  assert.equal(h.store.get(channel.id).pendingDeletion.actorId, OWNER);
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  h.service.stop();
+  h.guild.channels.fetch = fetch;
+  let attempted = false;
+  channel.delete = async () => { attempted = true; throw new Error('ne doit pas être appelé'); };
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingDeletions(h.guild);
+  assert.equal(attempted, false);
+  assert.equal(reloaded.get(channel.id).pendingDeletion, null);
+  assert.equal(reloaded.get(channel.id).status, 'waiting');
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+});
+
+test('la reprise finalise un salon disparu mais préserve les salons existants et leurs anciens tickets fermés', async (t) => {
+  const h = harness(t);
+  const removed = await openTicket(h);
+  const existing = await openTicket(h, 'question');
+  const legacy = await openTicket(h, 'fondation');
+  await makeLegacyClosed(h, legacy.channel);
+  const requestedAt = '2026-01-01T00:00:00.000Z';
+  for (const channel of [removed.channel, existing.channel]) {
+    h.store.save({ ...h.store.get(channel.id), pendingDeletion: { actorId: OWNER, requestedAt } });
+  }
+  h.service.stop();
+  h.guild.channelMap.delete(removed.channel.id);
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingDeletions(h.guild);
+  assert.equal(reloaded.get(removed.channel.id).status, 'deleted');
+  assert.equal(reloaded.get(removed.channel.id).closedBy, OWNER);
+  assert.equal(reloaded.get(removed.channel.id).closedAt, requestedAt);
+  assert.equal(reloaded.get(removed.channel.id).pendingDeletion, null);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
+  assert.equal(reloaded.get(existing.channel.id).status, 'waiting');
+  assert.equal(reloaded.get(existing.channel.id).pendingDeletion, null);
+  assert.equal(h.guild.channelMap.has(existing.channel.id), true);
+  assert.equal(reloaded.get(legacy.channel.id).status, 'closed');
+  assert.equal(h.guild.channelMap.has(legacy.channel.id), true);
+});
+
+test('après suppression, une erreur disque est réparée au redémarrage grâce au journal', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const save = h.store.save.bind(h.store);
+  h.store.save = (ticket) => {
+    if (ticket.status === 'deleted') throw new Error('disque indisponible après suppression');
+    return save(ticket);
+  };
+  const response = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(response.response.content, /Une erreur/);
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+  assert.equal(h.store.get(channel.id).pendingDeletion.actorId, OWNER);
+  assert.ok(h.store.findOpen(OWNER, 'plainte'));
+  h.service.stop();
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingDeletions(h.guild);
+  assert.equal(reloaded.get(channel.id).status, 'deleted');
+  assert.equal(reloaded.get(channel.id).closedBy, OWNER);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
+});
+
+test('la fermeture, ChannelDelete et une nouvelle ouverture sont sérialisés par propriétaire et type', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let release;
+  let started;
+  let deletionEvent;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const running = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  const deleteChannel = channel.delete.bind(channel);
+  channel.delete = async () => {
+    started();
+    await gate;
+    const result = await deleteChannel();
+    deletionEvent = h.service.channelDeleted(channel);
+    return result;
+  };
+  const closing = press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  await running;
+  const opening = openTicket(h);
+  await Promise.resolve();
+  assert.equal(h.guild.createCount, 1);
+  assert.equal(h.store.get(channel.id).pendingDeletion.actorId, OWNER);
+  release();
+  const [, replacement] = await Promise.all([closing, opening]);
+  await deletionEvent;
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).closedBy, OWNER);
+  assert.notEqual(replacement.channel.id, channel.id);
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, replacement.channel.id);
+  assert.equal(h.guild.createCount, 2);
+});
+
+test('une suppression annule un renommage déjà en vol sans ressusciter le ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let release;
+  let started;
+  channel.renameGate = new Promise((resolve) => { release = resolve; });
+  const running = new Promise((resolve) => { started = resolve; });
+  channel.onRenameStart = started;
+  t.after(() => release());
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await running;
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).renamePending, false);
+  assert.equal(h.service.names.jobs.has(channel.id), false);
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+});
+
+test('la reprise d’un ticket déjà attribué est explicite, personnelle et vérifiée sous verrou', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  const request = interaction(h.guild, { kind: 'command', channel, commandName: 'ticket-prendre', userId: STRANGER, roles: [ROLE] });
+  await h.handle(request);
+  assert.match(request.response.content, new RegExp(`déjà attribué à <@${STAFF}>`));
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const takeoverId = request.response.components[0].toJSON().components[0].custom_id;
+  assert.ok(takeoverId.length <= 100);
+  const wrongUser = await press(h, channel, takeoverId, { userId: OWNER, roles: [ROLE] });
+  assert.match(wrongUser.response.content, /ne vous appartient pas/);
+  const revoked = await press(h, channel, takeoverId, { userId: STRANGER });
+  assert.match(revoked.response.content, /Seule l’équipe/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const accepted = await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE] });
+  assert.match(accepted.response.content, /Pris en charge/);
+  assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
+
+  const staleRequest = await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  const staleId = staleRequest.response.components[0].toJSON().components[0].custom_id;
+  await press(h, channel, IDS.waiting, { userId: STRANGER, roles: [ROLE] });
+  const stale = await press(h, channel, staleId, { userId: STAFF, roles: [ROLE] });
+  assert.match(stale.response.content, /responsable a changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+});
+
+test('deux prises en charge simultanées ne réattribuent pas silencieusement le ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const first = interaction(h.guild, { channel, customId: IDS.claim, userId: STAFF, roles: [ROLE] });
+  const second = interaction(h.guild, { channel, customId: IDS.claim, userId: STRANGER, roles: [ROLE] });
+  await Promise.all([h.handle(first), h.handle(second)]);
+  const responses = [first.response, second.response];
+  assert.equal(responses.filter((response) => /déjà attribué/.test(response.content)).length, 1);
+  assert.equal(responses.filter((response) => /Pris en charge/.test(response.content)).length, 1);
+  assert.ok([STAFF, STRANGER].includes(h.store.get(channel.id).assignedTo));
+});
+
+test('la priorité staff est persistante, idempotente et ne modifie pas l’ancienneté', async (t) => {
+  const h = harness(t);
+  const { channel, ticket } = await openTicket(h);
+  const initialAge = h.store.get(channel.id).updatedAt;
+  const denied = await press(h, channel, IDS.urgent, { userId: OWNER });
+  assert.match(denied.response.content, /Seule l’équipe/);
+  const changed = await press(h, channel, IDS.urgent, { userId: STAFF, roles: [ROLE] });
+  assert.match(changed.response.content, /Priorité mise à jour.*Urgente/);
+  assert.equal(h.store.get(channel.id).urgent, true);
+  assert.equal(h.store.get(channel.id).updatedAt, initialAge);
+  const panel = channel.messageMap.get(ticket.panelMessageId).payload;
+  assert.match(panel.embeds[0].toJSON().fields[3].value, /Urgente/);
+  assert.ok(panel.components.flatMap((row) => row.toJSON().components).some((button) => button.custom_id === IDS.normal));
+  const before = channel.sent.length;
+  const repeated = await press(h, channel, IDS.urgent, { userId: STAFF, roles: [ROLE] });
+  assert.match(repeated.response.content, /Priorité inchangée/);
+  assert.equal(channel.sent.length, before);
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  assert.equal(reloaded.get(channel.id).urgent, true);
+  const normal = await press(h, channel, IDS.normal, { userId: STAFF, roles: [ROLE] });
+  assert.match(normal.response.content, /Priorité mise à jour.*Normale/);
+  assert.equal(h.store.get(channel.id).urgent, false);
+  assert.equal(h.store.get(channel.id).updatedAt, initialAge);
+  assert.deepEqual(channel.sent.at(-1).payload.allowedMentions, { parse: [] });
+});
+
+test('une ancienne confirmation de reprise est refusée même si le même responsable revient', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  const requested = await press(h, channel, IDS.claim, { userId: STRANGER, roles: [ROLE] });
+  const staleId = requested.response.components[0].toJSON().components[0].custom_id;
+  const initialRevision = h.store.get(channel.id).assignmentRevision;
+  await press(h, channel, IDS.waiting, { userId: STAFF, roles: [ROLE] });
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  assert.ok(h.store.get(channel.id).assignmentRevision > initialRevision);
+  const stale = await press(h, channel, staleId, { userId: STRANGER, roles: [ROLE] });
+  assert.match(stale.response.content, /responsable a changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+});
+
+test('un redémarrage ne peut pas effacer le journal si Discord est injoignable', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const requestedAt = new Date().toISOString();
+  h.store.save({ ...h.store.get(channel.id), pendingDeletion: { actorId: OWNER, requestedAt } });
+  h.guild.channels.fetch = async () => { throw new Error('réseau indisponible'); };
+  await assert.rejects(h.service.recoverPendingDeletions(h.guild), /réseau indisponible/);
+  assert.deepEqual(h.store.get(channel.id).pendingDeletion, { actorId: OWNER, requestedAt });
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+});
+
+test('un ancien ticket fermé supprimé juste avant une interruption est réconcilié sans affecter un nouveau ticket', async (t) => {
+  const h = harness(t);
+  const old = await openTicket(h);
+  const legacy = await makeLegacyClosed(h, old.channel);
+  const newer = await openTicket(h);
+  const requestedAt = new Date().toISOString();
+  h.store.save({ ...legacy, pendingDeletion: { actorId: STAFF, requestedAt } });
+  h.service.stop();
+  h.guild.channelMap.delete(old.channel.id);
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingDeletions(h.guild);
+  assert.equal(reloaded.get(old.channel.id).status, 'deleted');
+  assert.equal(reloaded.get(old.channel.id).closedAt, legacy.closedAt);
+  assert.equal(reloaded.get(old.channel.id).closedBy, null, 'Le responsable historique de la fermeture n’était pas connu.');
+  assert.equal(reloaded.get(old.channel.id).deletedBy, STAFF);
+  assert.equal(reloaded.get(old.channel.id).deletionRequestedAt, requestedAt);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte').channelId, newer.channel.id);
+});
+
+test('une ancienne attribution sans numéro de révision peut être reprise après confirmation', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  const old = h.store.get(channel.id);
+  delete old.assignmentRevision;
+  delete old.urgent;
+  h.store.save(old);
+  const requested = await press(h, channel, IDS.claim, { userId: STRANGER, roles: [ROLE] });
+  const takeoverId = requested.response.components[0].toJSON().components[0].custom_id;
+  assert.ok(takeoverId.endsWith(':0'));
+  await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE] });
+  assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
+  assert.equal(h.store.get(channel.id).assignmentRevision, 1);
+});
+
+test('deux confirmations simultanées ne demandent qu’une suppression Discord', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let calls = 0;
+  const deleteChannel = channel.delete.bind(channel);
+  channel.delete = async () => { calls++; return deleteChannel(); };
+  const first = interaction(h.guild, { channel, customId: IDS.closeDeleteConfirm, userId: OWNER });
+  const second = interaction(h.guild, { channel, customId: IDS.closeDeleteConfirm, userId: STAFF, roles: [ROLE] });
+  await Promise.all([h.handle(first), h.handle(second)]);
+  assert.equal(calls, 1);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.guild.channelMap.has(channel.id), false);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+});
+
+test('un refus de suppression ne lance pas un deuxième renommage pendant un PATCH déjà en vol', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let release;
+  let started;
+  channel.renameGate = new Promise((resolve) => { release = resolve; });
+  const running = new Promise((resolve) => { started = resolve; });
+  channel.onRenameStart = started;
+  t.after(() => release());
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await running;
+  channel.failDelete = true;
+  const failed = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(failed.response.content, /n’a pas été supprimé/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(channel.renameAttempts.length, 1, 'Le premier PATCH doit terminer avant toute nouvelle tentative.');
+  await press(h, channel, IDS.resolve, { userId: STAFF, roles: [ROLE] });
+  assert.equal(channel.renameAttempts.length, 1);
+  release();
+  await waitForName(h.store, channel);
+  assert.equal(channel.renameAttempts.length, 2);
+  assert.match(channel.name, /^🟢-traite-/u);
+  assert.equal(h.store.get(channel.id).status, 'resolved');
+});
+
+test('la suppression confirmée ne dépend pas de restaurer une ancienne transition de permissions', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  h.store.save({ ...h.store.get(channel.id), pendingTransition: { ownerWrites: snapshotOwnerWrites(channel, OWNER) } });
+  channel.failPermissionEdit = true;
+  channel.failDelete = true;
+  const failed = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.match(failed.response.content, /n’a pas été supprimé/);
+  assert.ok(h.store.get(channel.id).pendingTransition, 'Un échec de suppression doit conserver l’ancien journal.');
+  assert.equal(h.store.get(channel.id).pendingDeletion, null);
+  channel.failDelete = false;
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).pendingTransition, null);
+  assert.equal(h.guild.channelMap.has(channel.id), false);
 });

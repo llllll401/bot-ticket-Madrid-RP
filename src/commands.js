@@ -10,6 +10,12 @@ export const commands = [
     .setName('ticket-panneau')
     .setDescription('Réparer le panneau de gestion et le nom du ticket actuel.'),
   new SlashCommandBuilder()
+    .setName('ticket-prendre')
+    .setDescription('Prendre ou reprendre le ticket actuel.'),
+  new SlashCommandBuilder()
+    .setName('ticket-fermer')
+    .setDescription('Fermer le ticket actuel et supprimer son salon après confirmation.'),
+  new SlashCommandBuilder()
     .setName('tickets')
     .setDescription('Consulter les tickets accessibles à votre équipe.')
     .addStringOption((option) => option
@@ -21,8 +27,8 @@ export const commands = [
         { name: '🟠 Pris en charge', value: 'claimed' },
         { name: '🟡 En cours', value: 'progress' },
         { name: '🟢 Traités', value: 'resolved' },
-        { name: '⚫ Fermés', value: 'closed' },
-        { name: 'Tous, y compris les fermés', value: 'all' },
+        { name: '⚫ Anciens tickets fermés', value: 'closed' },
+        { name: 'Ouverts et anciens fermés', value: 'all' },
       ))
     .addStringOption((option) => option
       .setName('categorie')
@@ -33,5 +39,15 @@ export const commands = [
       .setDescription('Afficher les tickets attribués à cette personne.'))
     .addBooleanOption((option) => option
       .setName('mes_tickets')
-      .setDescription('Afficher uniquement les tickets qui vous sont attribués.')),
+      .setDescription('Afficher uniquement les tickets qui vous sont attribués.'))
+    .addBooleanOption((option) => option
+      .setName('sans_responsable')
+      .setDescription('Afficher les tickets qui ne sont attribués à personne.'))
+    .addStringOption((option) => option
+      .setName('priorite')
+      .setDescription('Filtrer selon la priorité du ticket.')
+      .addChoices(
+        { name: '🚨 Urgente', value: 'urgent' },
+        { name: 'Normale', value: 'normal' },
+      )),
 ];

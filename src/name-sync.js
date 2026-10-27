@@ -24,7 +24,7 @@ export class ChannelNameSynchronizer {
 
   schedule(guild, channelId, { retryNow = false } = {}) {
     const ticket = this.store.get(channelId);
-    if (!ticket || ticket.status === 'deleted' || !ticket.renamePending) return;
+    if (!ticket || ticket.status === 'deleted' || ticket.pendingDeletion || !ticket.renamePending) return;
     if (guild.id !== this.guildId) throw new Error('Serveur incorrect pour la synchronisation du nom.');
     const existing = this.jobs.get(channelId);
     if (existing) {
@@ -79,7 +79,7 @@ export class ChannelNameSynchronizer {
     try {
       const ticket = await this.locks.run(job.key, () => {
         const current = this.store.get(job.channelId);
-        if (!current || current.status === 'deleted' || !current.renamePending || current.pendingTransition) {
+        if (!current || current.status === 'deleted' || current.pendingDeletion || !current.renamePending || current.pendingTransition) {
           this.cancel(job.channelId);
           return null;
         }
@@ -101,7 +101,7 @@ export class ChannelNameSynchronizer {
           const stillRelevant = await this.locks.run(job.key, () => {
             const latest = this.store.get(job.channelId);
             return !job.cancelled && latest && latest.status !== 'deleted'
-              && !latest.pendingTransition && channelName(latest) === target;
+              && !latest.pendingDeletion && !latest.pendingTransition && channelName(latest) === target;
           });
           if (!stillRelevant) {
             this.#later(job, 0, 'new-status');
@@ -128,7 +128,7 @@ export class ChannelNameSynchronizer {
       await this.locks.run(job.key, async () => {
         if (job.cancelled) return;
         const current = this.store.get(job.channelId);
-        if (!current || current.status === 'deleted' || current.pendingTransition) {
+        if (!current || current.status === 'deleted' || current.pendingDeletion || current.pendingTransition) {
           this.cancel(job.channelId);
         } else if (channelName(current) !== target) {
           // Un nouveau statut est arrivé pendant la requête : ignorer les étapes

@@ -32,6 +32,7 @@ async function main() {
       const guild = await readyClient.guilds.fetch(config.guildId);
       await validateGuildConfiguration(guild, config);
       service = new TicketService({ config, store, botUserId: readyClient.user.id });
+      await service.recoverPendingDeletions(guild);
       await service.recoverPendingTransitions(guild);
       await service.syncConfiguredRoles(guild);
       service.resumePendingRenames(guild);

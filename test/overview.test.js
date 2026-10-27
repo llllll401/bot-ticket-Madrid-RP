@@ -34,7 +34,7 @@ function ticket(number, options = {}) {
     ownerId: String(600000000000000000n + BigInt(number)),
     number, type: options.type ?? 'plainte', status: options.status ?? 'waiting',
     ownerName: `Membre ${number}`, progressDetail: options.progressDetail ?? null,
-    assignedTo: options.assignedTo ?? null, staffRoleIds: [ROLE], panelMessageId: null,
+    assignedTo: options.assignedTo ?? null, urgent: options.urgent, staffRoleIds: [ROLE], panelMessageId: null,
     createdAt: timestamp, updatedAt: timestamp, closedAt: null, closedPermissions: null, deletedAt: null,
   };
 }
@@ -193,14 +193,14 @@ test('pagination, tri des attentes les plus anciennes et identifiants de boutons
   const third = await click(h, buttons(second)[2].custom_id);
   assert.deepEqual(mentionedChannels(third), [ticket(4).channelId, ticket(3).channelId, ticket(2).channelId, ticket(1).channelId, ticket(21).channelId]);
   assert.equal(buttons(third)[2].disabled, true);
-  assert.equal(new Set(buttons(third).map((button) => button.custom_id)).size, 3);
+  assert.equal(new Set(buttons(third).map((button) => button.custom_id)).size, 5);
 
   const staleRefresh = buttons(third)[1].custom_id;
   h.store.records = [h.store.records[0]];
   const refreshed = await click(h, staleRefresh);
   assert.match(refreshed.response.embeds[0].toJSON().footer.text, /Page 1\/1/);
   assert.deepEqual(mentionedChannels(refreshed), [ticket(1).channelId]);
-  assert.equal(new Set(buttons(refreshed).map((button) => button.custom_id)).size, 3);
+  assert.equal(new Set(buttons(refreshed).map((button) => button.custom_id)).size, 5);
 });
 
 test('les filtres statut, catégorie et responsable sont combinés sans compter les autres catégories', async (t) => {
@@ -316,7 +316,7 @@ test('la vue parcourt plusieurs dizaines de tickets sans requête Discord par ti
   for (;;) {
     seen.push(...mentionedChannels(page));
     const controls = buttons(page);
-    assert.equal(new Set(controls.map((button) => button.custom_id)).size, 3);
+    assert.equal(new Set(controls.map((button) => button.custom_id)).size, 5);
     if (controls[2].disabled) break;
     page = await click(h, controls[2].custom_id);
   }
@@ -359,4 +359,55 @@ test('les filtres restent sérialisables avec des identifiants Discord de 20 chi
   assert.equal(parseOverviewButton(controls[1].custom_id).query.assignee, assignee);
   const refreshed = await click(h, controls[1].custom_id, { userId: viewer });
   assert.deepEqual(mentionedChannels(refreshed), [ticket(1).channelId]);
+});
+
+test('urgents prioritaires, filtres rapides et sans responsable restent privés et combinables', async (t) => {
+  const h = makeHarness(t);
+  const waiting = ticket(1);
+  const urgentAssigned = ticket(2, { status: 'progress', urgent: true, assignedTo: STAFF });
+  const urgentWaiting = ticket(3, { urgent: true });
+  const normalAssigned = ticket(4, { status: 'claimed', assignedTo: SPECIAL_STAFF });
+  const hidden = ticket(5, { type: 'rc_staff', urgent: true });
+  for (const entry of [waiting, urgentAssigned, urgentWaiting, normalAssigned, hidden]) h.add(entry);
+
+  const first = await runCommand(h);
+  assert.deepEqual(mentionedChannels(first), [urgentWaiting.channelId, urgentAssigned.channelId, waiting.channelId, normalAssigned.channelId]);
+  assert.match(description(first), /🚨 URGENT/);
+  assert.ok(!description(first).includes(hidden.channelId));
+  const urgent = await click(h, buttons(first)[3].custom_id);
+  assert.deepEqual(mentionedChannels(urgent), [urgentWaiting.channelId, urgentAssigned.channelId]);
+  assert.match(description(urgent), /urgents/);
+  assert.equal(parseOverviewButton(buttons(urgent)[1].custom_id).query.priority, 'urgent');
+  const urgentUnassigned = await click(h, buttons(urgent)[4].custom_id);
+  assert.deepEqual(mentionedChannels(urgentUnassigned), [urgentWaiting.channelId]);
+  assert.match(description(urgentUnassigned), /sans responsable/);
+  const normalUnassigned = await runCommand(h, { options: { priorite: 'normal', sans_responsable: true } });
+  assert.deepEqual(mentionedChannels(normalUnassigned), [waiting.channelId]);
+  const conflicting = await runCommand(h, { options: { sans_responsable: true, mes_tickets: true } });
+  assert.match(conflicting.response.content, /ne peut pas être combiné/);
+  const invalid = await runCommand(h, { options: { priorite: 'elevated' } });
+  assert.match(invalid.response.content, /filtres ne sont plus valides/);
+
+  h.api.members.get(STAFF).roles = [];
+  const revoked = await click(h, buttons(first)[3].custom_id, { shared: { ...first.response } });
+  assert.match(revoked.response.content, /Seule l’équipe/);
+  assert.deepEqual(revoked.response.embeds, []);
+});
+
+test('les anciens boutons de tableau restent valables et les nouveaux identifiants restent dans 100 caractères', async (t) => {
+  const h = makeHarness(t);
+  const viewer = '18446744073709551615';
+  const assignee = '18446744073709551614';
+  h.api.members.set(viewer, member(viewer, [ROLE]));
+  h.add(ticket(1, { type: 'demande_unban', status: 'progress', assignedTo: assignee, urgent: true }));
+  const oldId = `tickets:overview:${viewer}:progress:demande_unban:${assignee}:0:r`;
+  assert.equal(parseOverviewButton(oldId).query.priority, 'all');
+  const oldRefresh = await click(h, oldId, { userId: viewer });
+  assert.deepEqual(mentionedChannels(oldRefresh), [ticket(1).channelId]);
+  const urgent = await click(h, buttons(oldRefresh)[3].custom_id, { userId: viewer });
+  assert.deepEqual(mentionedChannels(urgent), [ticket(1).channelId]);
+  assert.ok(buttons(urgent).every((button) => button.custom_id.length <= 100));
+  const maxId = `tickets:overview:${viewer}:progress:demande_unban:${assignee}:urgent:999999999:u`;
+  assert.equal(maxId.length, 100);
+  assert.equal(parseOverviewButton(maxId).query.page, 999999999);
 });
