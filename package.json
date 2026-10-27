@@ -1,0 +1,17 @@
+{
+  "name": "bot-ticket-madrid-rp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot Discord de tickets en français pour Madrid RP",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  }
+}
