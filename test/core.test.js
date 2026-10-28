@@ -153,6 +153,7 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   assert.equal(assignment.custom_id, `${IDS.assignmentToggle}plainte:0:0`);
   assert.equal(Boolean(assignment.disabled), false);
   assert.equal(Boolean(button(open, IDS.manage).disabled), false);
+  assert.equal(Boolean(button(open, IDS.remindOwner).disabled), false);
   assert.equal(Boolean(button(open, IDS.close).disabled), false);
   assert.equal(button(open, IDS.claim), undefined);
   assert.equal(button(open, IDS.waiting), undefined);
@@ -166,6 +167,7 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   const closed = ticketPanel({ ...record(), status: 'closed' });
   assert.equal(closed.components[0].toJSON().components.some((item) => item.custom_id.startsWith(IDS.assignmentToggle)), false);
   assert.equal(button(closed, IDS.claim), undefined);
+  assert.equal(button(closed, IDS.remindOwner), undefined);
   assert.equal(button(closed, IDS.waiting), undefined);
   assert.equal(Boolean(button(closed, IDS.reopen).disabled), false);
   assert.equal(Boolean(button(closed, IDS.delete).disabled), false);

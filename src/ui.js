@@ -6,7 +6,7 @@ import { STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from '
 import { MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 
 // Incrémenter si les boutons de gestion doivent être mis à jour sur les anciens tickets.
-export const TICKET_PANEL_VERSION = 5;
+export const TICKET_PANEL_VERSION = 6;
 
 export const IDS = Object.freeze({
   open: 'tickets:open',
@@ -24,6 +24,7 @@ export const IDS = Object.freeze({
   noteInput: 'note',
   roleMessageInput: 'message',
   assignmentToggle: 'ticket:assignment:',
+  remindOwner: 'ticket:remind-owner',
   claim: 'ticket:claim',
   claimTakeover: 'ticket:claim:takeover:',
   waiting: 'ticket:waiting',
@@ -50,7 +51,8 @@ export function publicPanel() {
     .setDescription(
       'Besoin d’aide ? Choisissez le type de votre demande ci-dessous.\n' +
       'Un salon privé sera créé pour vous et l’équipe concernée. Merci d’y expliquer votre demande.\n' +
-      'Fermer un ticket supprime définitivement le salon et ses messages après confirmation, sans transcription automatique.',
+      'Fermer un ticket supprime définitivement le salon et ses messages après confirmation, sans transcription automatique. '
+      + 'Après 24 h sans message humain dans le salon principal du ticket, un rappel est envoyé ; sans nouveau message dans ce salon pendant 24 h, il sera supprimé automatiquement.',
     )
     .addFields({
       name: 'Suivi des tickets',
@@ -75,7 +77,7 @@ export function ticketPanel(ticket) {
     .setTitle(`🎫 Ticket #${ticketNumber(ticket.number)} • ${TYPE_BY_KEY[ticket.type].label}`)
     .setDescription(closed
       ? 'Ancien ticket fermé avant la mise à jour. L’équipe peut le rouvrir ou supprimer définitivement son salon.'
-      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés.')
+      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés. Après 24 h sans message humain dans ce salon principal, un rappel précède une suppression automatique 24 h plus tard si personne n’y répond. Les messages dans les fils ne comptent pas.')
     .addFields(
       { name: 'Créateur', value: `<@${ticket.ownerId}>`, inline: true },
       { name: 'Statut', value: escapeMarkdown(statusLabel(ticket)), inline: true },
@@ -97,6 +99,7 @@ export function ticketPanel(ticket) {
         .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
         .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
     )];
   return {
