@@ -148,6 +148,10 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   const button = (panel, id) => panel.components.flatMap((row) => row.toJSON().components).find((item) => item.custom_id === id);
   const open = ticketPanel(record());
   assert.equal(open.embeds[0].toJSON().fields[1].value, '🔴 En attente');
+  const assignment = open.components[0].toJSON().components.find((item) => item.custom_id.startsWith(IDS.assignmentToggle));
+  assert.equal(assignment.label, 'Prendre en charge / laisser');
+  assert.equal(assignment.custom_id, `${IDS.assignmentToggle}plainte:0:0`);
+  assert.equal(Boolean(assignment.disabled), false);
   assert.equal(Boolean(button(open, IDS.manage).disabled), false);
   assert.equal(Boolean(button(open, IDS.close).disabled), false);
   assert.equal(button(open, IDS.claim), undefined);
@@ -160,6 +164,7 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   const options = menu.components[0].toJSON().components[0].options.map((option) => option.value);
   assert.deepEqual(options, ['claim', 'progress', 'resolve', 'waiting', 'priority', 'category', 'note-add', 'note-list', 'role']);
   const closed = ticketPanel({ ...record(), status: 'closed' });
+  assert.equal(closed.components[0].toJSON().components.some((item) => item.custom_id.startsWith(IDS.assignmentToggle)), false);
   assert.equal(button(closed, IDS.claim), undefined);
   assert.equal(button(closed, IDS.waiting), undefined);
   assert.equal(Boolean(button(closed, IDS.reopen).disabled), false);
@@ -372,8 +377,8 @@ test('le registre accepte les anciennes données mais refuse une priorité ou un
 test('le menu dossier et ses formulaires respectent les limites Discord, même avec des IDs de 20 chiffres', () => {
   const viewer = '18446744073709551615';
   const roleId = '18446744073709551614';
-  const item = { ...record(), type: 'demande_unban', categoryRevision: Number.MAX_SAFE_INTEGER };
-  const payloads = [dossierMenu(item, viewer), dossierPriority(item, viewer), dossierCategory(item, viewer),
+  const item = { ...record(), type: 'demande_unban', categoryRevision: Number.MAX_SAFE_INTEGER, assignmentRevision: Number.MAX_SAFE_INTEGER };
+  const payloads = [ticketPanel(item), dossierMenu(item, viewer), dossierPriority(item, viewer), dossierCategory(item, viewer),
     categoryConfirmation(item, viewer, 'partenariat'), dossierRoleSelector(viewer), internalNotesPage([], viewer)];
   for (const payload of payloads) {
     for (const row of payload.components) {

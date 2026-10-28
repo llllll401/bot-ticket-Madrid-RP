@@ -249,6 +249,13 @@ async function press(h, channel, customId, options = {}) {
 
 const staffAccess = { userId: STAFF, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] };
 
+function assignmentButton(h, channel) {
+  const ticket = h.store.get(channel.id);
+  const panel = channel.messageMap.get(ticket.panelMessageId).payload;
+  return panel.components.flatMap((row) => row.toJSON().components)
+    .find((component) => component.custom_id.startsWith(IDS.assignmentToggle));
+}
+
 async function choose(h, channel, customId, value, options = {}) {
   const item = interaction(h.guild, { kind: 'select', channel, customId, values: [value], ...staffAccess, ...options });
   await h.handle(item);
@@ -844,11 +851,12 @@ test('les anciens panneaux sont mis à niveau sans nouvelles mentions, avec repr
   assert.equal(h.store.get(channel.id).panelVersion, undefined);
   panel.failEdit = false;
   await h.service.refreshOutdatedPanels(h.guild);
-  assert.ok(h.store.get(channel.id).panelVersion >= 4);
+  assert.equal(h.store.get(channel.id).panelVersion, 5);
   assert.equal(channel.sent.length, messagesBefore);
   assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
   const ids = panel.payload.components.flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
   assert.ok(ids.includes(IDS.manage));
+  assert.ok(ids.some((id) => id.startsWith(IDS.assignmentToggle)));
   assert.ok(!ids.includes(IDS.waiting));
   const version = h.store.get(channel.id).panelVersion;
   await h.service.refreshOutdatedPanels(h.guild);
@@ -1893,4 +1901,204 @@ test('une liste incomplète ou une perte d’accès Discord ne supprime jamais l
   h.guild.channels.fetch = async () => { throw new Error('Discord indisponible'); };
   await h.service.reconcileMissingChannels(h.guild);
   assert.equal(h.store.get(channel.id).internalNotes[0].text, 'Note à conserver');
+});
+
+test('le bouton prend puis laisse le ticket sans toucher à la fermeture ou aux autres fonctions', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const button = assignmentButton(h, channel);
+  assert.equal(button.label, 'Prendre en charge / laisser');
+  const denied = await press(h, channel, button.custom_id, { userId: OWNER });
+  assert.match(denied.response.content, /Seule l’équipe/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+
+  const taken = await press(h, channel, button.custom_id, staffAccess);
+  assert.match(taken.response.content, /pris ce ticket en charge/);
+  assert.equal(taken.deferOptions.flags, MessageFlags.Ephemeral);
+  assert.equal(h.store.get(channel.id).status, 'claimed');
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  assert.equal(h.store.get(channel.id).assignmentRevision, 1);
+  const current = assignmentButton(h, channel);
+  assert.notEqual(current.custom_id, button.custom_id);
+  const stale = await press(h, channel, button.custom_id, staffAccess);
+  assert.match(stale.response.content, /responsable a changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+
+  await h.service.setStatus(h.guild, channel.id, 'progress', STAFF, 'analyse du dossier');
+  await h.service.setUrgent(h.guild, channel.id, true, STAFF);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note conservée');
+  const released = await press(h, channel, assignmentButton(h, channel).custom_id, staffAccess);
+  assert.match(released.response.content, /laissé ce ticket/);
+  const ticket = h.store.get(channel.id);
+  assert.equal(ticket.status, 'waiting');
+  assert.equal(ticket.assignedTo, null);
+  assert.equal(ticket.progressDetail, null);
+  assert.equal(ticket.assignmentRevision, 2);
+  assert.equal(ticket.urgent, true);
+  assert.equal(ticket.internalNotes[0].text, 'Note conservée');
+  assert.equal(h.guild.channelMap.has(channel.id), true);
+  const ids = channel.messageMap.get(ticket.panelMessageId).payload.components[0].toJSON().components.map((item) => item.custom_id);
+  assert.ok(ids.includes(IDS.manage));
+  assert.ok(ids.includes(IDS.close));
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🔴-attente-/u);
+});
+
+test('un autre membre du staff ne peut reprendre le ticket qu’après confirmation', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await press(h, channel, assignmentButton(h, channel).custom_id, staffAccess);
+  const otherStaff = { ...staffAccess, userId: STRANGER };
+  const conflict = await press(h, channel, assignmentButton(h, channel).custom_id, otherStaff);
+  assert.match(conflict.response.content, /déjà attribué/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const confirmId = conflict.response.components[0].toJSON().components[0].custom_id;
+  const denied = await press(h, channel, confirmId, staffAccess);
+  assert.match(denied.response.content, /ne vous appartient pas/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const accepted = await press(h, channel, confirmId, otherStaff);
+  assert.match(accepted.response.content, /Pris en charge/);
+  assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
+  const released = await press(h, channel, assignmentButton(h, channel).custom_id, otherStaff);
+  assert.match(released.response.content, /laissé ce ticket/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+});
+
+test('deux clics simultanés sur le même bouton ne prennent puis ne laissent pas le ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const customId = assignmentButton(h, channel).custom_id;
+  const first = interaction(h.guild, { channel, customId, ...staffAccess });
+  const second = interaction(h.guild, { channel, customId, ...staffAccess });
+  await Promise.all([h.handle(first), h.handle(second)]);
+  assert.equal([first, second].filter((item) => /pris ce ticket en charge/.test(item.response.content)).length, 1);
+  assert.equal([first, second].filter((item) => /responsable a changé/.test(item.response.content)).length, 1);
+  assert.equal(h.store.get(channel.id).status, 'claimed');
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  assert.equal(h.store.get(channel.id).assignmentRevision, 1);
+});
+
+test('le bouton direct respecte les droits actuels et refuse les anciennes catégories', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const original = assignmentButton(h, channel).custom_id;
+  const noView = await press(h, channel, original, { ...staffAccess, permissions: [] });
+  assert.match(noView.response.content, /voir ce salon/);
+  const revoked = await press(h, channel, original, { ...staffAccess, freshRoles: [] });
+  assert.match(revoked.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  const invalid = await press(h, channel, `${IDS.assignmentToggle}plainte:0:abc`, staffAccess);
+  assert.match(invalid.response.content, /expiré/);
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  await press(h, channel, selected.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  const stale = await press(h, channel, original, staffAccess);
+  assert.match(stale.response.content, /catégorie du ticket a changé/);
+  assert.equal(h.store.get(channel.id).type, 'question');
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  const fresh = await press(h, channel, assignmentButton(h, channel).custom_id, staffAccess);
+  assert.match(fresh.response.content, /pris ce ticket en charge/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+});
+
+test('les panneaux de version 4 retrouvent le bouton sans nouvelle mention', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const ticket = h.store.get(channel.id);
+  h.store.save({ ...ticket, panelVersion: 4 });
+  const panel = channel.messageMap.get(ticket.panelMessageId);
+  const row = panel.payload.components[0].toJSON();
+  row.components = row.components.filter((item) => !item.custom_id.startsWith(IDS.assignmentToggle));
+  panel.payload.components = [{ toJSON: () => row }];
+  assert.equal(assignmentButton(h, channel), undefined);
+  const messagesBefore = channel.sent.length;
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.equal(h.store.get(channel.id).panelVersion, 5);
+  assert.equal(assignmentButton(h, channel).label, 'Prendre en charge / laisser');
+  assert.equal(channel.sent.length, messagesBefore);
+  assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
+});
+
+test('des clics simultanés de deux membres du staff ne transfèrent pas silencieusement le ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const customId = assignmentButton(h, channel).custom_id;
+  const first = interaction(h.guild, { channel, customId, ...staffAccess });
+  const second = interaction(h.guild, { channel, customId, ...staffAccess, userId: STRANGER });
+  await Promise.all([h.handle(first), h.handle(second)]);
+  assert.equal([first, second].filter((item) => /pris ce ticket en charge/.test(item.response.content)).length, 1);
+  assert.equal([first, second].filter((item) => /responsable a changé/.test(item.response.content)).length, 1);
+  const winner = h.store.get(channel.id).assignedTo;
+  assert.ok([STAFF, STRANGER].includes(winner));
+  assert.equal(h.store.get(channel.id).assignmentRevision, 1);
+});
+
+test('si le panneau ne s’actualise pas, son ancien bouton ne peut pas annuler la prise en charge', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const ticket = h.store.get(channel.id);
+  const panel = channel.messageMap.get(ticket.panelMessageId);
+  const staleId = assignmentButton(h, channel).custom_id;
+  panel.failEdit = true;
+  const taken = await press(h, channel, staleId, staffAccess);
+  assert.match(taken.response.content, /panneau n’a pas pu être actualisé/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const stale = await press(h, channel, staleId, staffAccess);
+  assert.match(stale.response.content, /ticket-panneau/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  panel.failEdit = false;
+  await h.service.repair(h.guild, channel.id);
+  assert.notEqual(assignmentButton(h, channel).custom_id, staleId);
+  const released = await press(h, channel, assignmentButton(h, channel).custom_id, staffAccess);
+  assert.match(released.response.content, /laissé ce ticket/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+});
+
+test('le bouton refuse sans modifier le ticket si le compteur d’attribution est épuisé', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const original = h.store.get(channel.id);
+  h.store.save({ ...original, assignmentRevision: Number.MAX_SAFE_INTEGER });
+  await h.service.repair(h.guild, channel.id);
+  const item = await press(h, channel, assignmentButton(h, channel).custom_id, staffAccess);
+  assert.match(item.response.content, /compteur d’attribution est épuisé/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+});
+
+test('le bouton ne peut pas modifier un ancien ticket fermé ni fonctionner sur un autre serveur', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const customId = assignmentButton(h, channel).custom_id;
+  const foreign = interaction(h.guild, { channel, customId, ...staffAccess, guildId: OTHER_GUILD });
+  await h.handle(foreign);
+  assert.equal(foreign.response, null);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  await makeLegacyClosed(h, channel);
+  const closed = await press(h, channel, customId, staffAccess);
+  assert.match(closed.response.content, /ticket est fermé/);
+  assert.equal(h.store.get(channel.id).status, 'closed');
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+});
+
+test('les droits sont revérifiés après l’attente du verrou du ticket', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const customId = assignmentButton(h, channel).custom_id;
+  let release;
+  let started;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const running = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  const locked = h.service.locks.run(OWNER, async () => { started(); await gate; });
+  await running;
+  const click = interaction(h.guild, { channel, customId, ...staffAccess });
+  const pending = h.handle(click);
+  await Promise.resolve();
+  h.guild.memberMap.get(STAFF).roles.cache.clear();
+  release();
+  await Promise.all([locked, pending]);
+  assert.match(click.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
 });

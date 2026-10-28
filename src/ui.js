@@ -6,7 +6,7 @@ import { STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from '
 import { MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 
 // Incrémenter si les boutons de gestion doivent être mis à jour sur les anciens tickets.
-export const TICKET_PANEL_VERSION = 4;
+export const TICKET_PANEL_VERSION = 5;
 
 export const IDS = Object.freeze({
   open: 'tickets:open',
@@ -23,6 +23,7 @@ export const IDS = Object.freeze({
   manageRoleSubmit: 'ticket:dossier:ping:',
   noteInput: 'note',
   roleMessageInput: 'message',
+  assignmentToggle: 'ticket:assignment:',
   claim: 'ticket:claim',
   claimTakeover: 'ticket:claim:takeover:',
   waiting: 'ticket:waiting',
@@ -92,6 +93,9 @@ export function ticketPanel(ticket) {
       new ButtonBuilder().setCustomId(IDS.delete).setLabel('Supprimer le salon').setStyle(ButtonStyle.Danger),
     )]
     : [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
+        .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
     )];

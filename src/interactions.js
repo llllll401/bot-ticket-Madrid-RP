@@ -124,6 +124,25 @@ export function createInteractionHandler({ config, service, logger = console }) 
     const roleSelect = interaction.isRoleSelectMenu?.() ?? false;
     const modal = interaction.isModalSubmit();
 
+    if (button && id.startsWith(IDS.assignmentToggle)) {
+      const parts = id.slice(IDS.assignmentToggle.length).split(':');
+      if (parts.length !== 3 || !/^\d{1,16}$/.test(parts[2]) || !Number.isSafeInteger(Number(parts[2]))) {
+        throw new UserError('Ce bouton a expiré. Utilisez le panneau actualisé.');
+      }
+      const expectedCategory = categoryFromParts(parts[0], parts[1]);
+      const ticket = service.requireTicket(interaction.channelId);
+      ensureDossierAccess(interaction, ticket, config);
+      await interaction.deferReply(ephemeral);
+      const result = await service.toggleAssignment(interaction.guild, interaction.channelId, interaction.user.id, {
+        expectedCategory, expectedAssignmentRevision: Number(parts[2]), authorize: freshDossierAuthorization(interaction, config),
+      });
+      if (result.conflict) await reportClaim(interaction, result);
+      else {
+        const action = result.released ? 'Vous avez laissé ce ticket.' : 'Vous avez pris ce ticket en charge.';
+        await interaction.editReply({ content: `✅ ${action} ${feedback(result)}`, allowedMentions: { parse: [] } });
+      }
+      return true;
+    }
     if (button && id === IDS.manage) {
       const ticket = service.requireTicket(interaction.channelId);
       ensureDossierAccess(interaction, ticket, config);
