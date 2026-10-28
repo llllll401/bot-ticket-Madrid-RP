@@ -275,6 +275,32 @@ export class TicketService {
     }, { expectedCategory, authorize });
   }
 
+  async toggleAssignment(guild, channelId, actorId, { expectedCategory, expectedAssignmentRevision, authorize } = {}) {
+    if (!Number.isSafeInteger(expectedAssignmentRevision) || expectedAssignmentRevision < 0) {
+      throw new UserError('Ce bouton a expiré. Utilisez le panneau actualisé.');
+    }
+    return this.#withTicket(guild, channelId, async (ticket, channel) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      const revision = ticket.assignmentRevision ?? 0;
+      // Deux clics sur le même panneau ne doivent pas prendre puis aussitôt
+      // laisser le ticket, ni modifier une attribution qui a changé entre-temps.
+      if (revision !== expectedAssignmentRevision) {
+        throw new UserError('Le responsable a changé depuis l’affichage. Utilisez le bouton actualisé ou /ticket-panneau.');
+      }
+      if (ticket.assignedTo && ticket.assignedTo !== actorId) return { ticket, conflict: ticket.assignedTo };
+      if (revision === Number.MAX_SAFE_INTEGER) {
+        throw new UserError('Le compteur d’attribution est épuisé. Prévenez un administrateur.');
+      }
+      const released = ticket.assignedTo === actorId;
+      const next = {
+        ...ticket, status: released ? 'waiting' : 'claimed', assignedTo: released ? null : actorId,
+        progressDetail: null, assignmentRevision: revision + 1, updatedAt: now(),
+      };
+      const result = await this.#commitTransition(guild, channel, ticket, next, actorId);
+      return { ...result, released };
+    }, { expectedCategory, authorize });
+  }
+
   async setUrgent(guild, channelId, urgent, actorId, { expectedCategory, authorize } = {}) {
     if (typeof urgent !== 'boolean') throw new Error('Priorité invalide.');
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
