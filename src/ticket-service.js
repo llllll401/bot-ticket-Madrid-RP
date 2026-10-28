@@ -1,7 +1,9 @@
+import { randomBytes } from 'node:crypto';
 import { ChannelType, OverwriteType, PermissionFlagsBits, escapeMarkdown } from 'discord.js';
 import { channelName, slugify, statusLabel, ticketNumber, TYPE_BY_KEY } from './catalog.js';
 import { cleanDossierText, MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 import { isFullCategory, isServerChannelLimit, isUnknownChannel, isUnknownMessage, UserError } from './errors.js';
+import { inactivityDueAt, latestHumanMessageSince } from './inactivity.js';
 import { KeyedLock } from './lock.js';
 import { ChannelNameSynchronizer } from './name-sync.js';
 import { snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
@@ -12,12 +14,16 @@ const slot = (ownerId) => ownerId;
 const now = () => new Date().toISOString();
 
 export class TicketService {
-  constructor({ config, store, botUserId, logger = console }) {
+  constructor({ config, store, botUserId, logger = console, clock = Date.now }) {
     this.config = config;
     this.store = store;
     this.botUserId = botUserId;
     this.logger = logger;
+    this.clock = clock;
     this.stopped = false;
+    // Noter immédiatement les messages reçus, même si le verrou du ticket est
+    // occupé par une vérification ou une suppression automatique.
+    this.pendingActivity = new Map();
     this.locks = new KeyedLock();
     this.names = new ChannelNameSynchronizer({
       store, locks: this.locks, guildId: config.guildId, logger,
@@ -45,6 +51,7 @@ export class TicketService {
     }
     if (!channel) {
       this.store.markDeleted(ticket.channelId);
+      this.pendingActivity.delete(ticket.channelId);
       this.names.cancel(ticket.channelId);
       return null;
     }
@@ -110,6 +117,7 @@ export class TicketService {
         status: 'waiting', assignedTo: null, assignmentRevision: 0, categoryRevision: 0, progressDetail: null, urgent: false,
         staffRoleIds: [...this.config.staffRolesByType[typeKey]], roleSyncPending: null, internalNotes: [],
         pendingTransition: null, pendingDeletion: null, pendingReclassification: null,
+        lastActivityAt: createdAt, inactivityReminder: null,
         renamePending: false, panelMessageId: null, panelVersion: null,
         createdAt, updatedAt: createdAt, closedAt: null, closedBy: null, closedPermissions: null,
         deletedAt: null, deletedBy: null, deletionRequestedAt: null,
@@ -461,14 +469,155 @@ export class TicketService {
     }, { expectedCategory, authorize });
   }
 
-  async #deleteConfirmed(guild, ticket, channel, actorId) {
+  #saveActivity(ticket, timestamp) {
+    const previous = Date.parse(ticket.lastActivityAt ?? ticket.createdAt);
+    if (timestamp <= previous) return ticket;
+    return this.store.save({ ...ticket, lastActivityAt: new Date(timestamp).toISOString(), inactivityReminder: null });
+  }
+
+  #flushPendingActivity(ticket) {
+    const timestamp = this.pendingActivity.get(ticket.channelId);
+    if (timestamp === undefined) return ticket;
+    const updated = this.#saveActivity(ticket, timestamp);
+    if (this.pendingActivity.get(ticket.channelId) === timestamp) this.pendingActivity.delete(ticket.channelId);
+    return updated;
+  }
+
+  // Ne stocker que la date du message : son contenu n'est ni lu ni archivé.
+  async recordMessageActivity(message) {
+    if (this.stopped || message.guildId !== this.config.guildId || message.author?.bot !== false || message.webhookId
+      || !Number.isFinite(message.createdTimestamp) || message.createdTimestamp < 0
+      || message.createdTimestamp > 8.64e15) return;
+    const original = this.store.get(message.channelId);
+    if (!original || ['closed', 'deleted'].includes(original.status)) return;
+    const previous = this.pendingActivity.get(original.channelId) ?? 0;
+    this.pendingActivity.set(original.channelId, Math.max(previous, message.createdTimestamp));
+    return this.locks.run(slot(original.ownerId), () => {
+      const ticket = this.store.get(original.channelId);
+      if (!ticket || ['closed', 'deleted'].includes(ticket.status)) {
+        this.pendingActivity.delete(original.channelId);
+        return;
+      }
+      this.#flushPendingActivity(ticket);
+    });
+  }
+
+  async remindOwner(guild, channelId, actorId, { expectedCategory, authorize } = {}) {
+    return this.#withTicket(guild, channelId, async (ticket, channel) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      await channel.send({
+        content: `🔔 <@${ticket.ownerId}>, l’équipe vous invite à répondre dans ce salon. • Rappel demandé par <@${actorId}>.`,
+        allowedMentions: { parse: [], users: [ticket.ownerId] },
+      });
+      return { ownerId: ticket.ownerId };
+    }, { expectedCategory, authorize });
+  }
+
+  async #ensureInactivityPermissions(guild, channel, { deleting = false } = {}) {
+    const [, bot] = await Promise.all([guild.roles.fetch(), guild.members.fetchMe({ force: true })]);
+    const permissions = bot && channel.permissionsFor(bot);
+    const required = PermissionFlagsBits.ViewChannel | PermissionFlagsBits.ReadMessageHistory
+      | (deleting ? PermissionFlagsBits.ManageChannels : PermissionFlagsBits.SendMessages);
+    if (!permissions?.has(required)) {
+      throw new Error('Permissions insuffisantes pour vérifier l’historique et traiter l’inactivité en sécurité.');
+    }
+  }
+
+  async #sendInactivityReminder(channel, ticket) {
+    const activityAt = ticket.lastActivityAt ?? ticket.createdAt;
+    const attemptedAt = new Date(this.clock()).toISOString();
+    const previous = ticket.inactivityReminder;
+    const pending = previous?.state === 'sending'
+      ? { ...previous, attemptedAt }
+      : { state: 'sending', activityAt, attemptedAt, nonce: randomBytes(12).toString('hex') };
+    // Journaliser avant l'envoi : une réponse incertaine ne peut jamais
+    // déclencher la suppression tant qu'un rappel n'est pas confirmé.
+    ticket = this.store.save({ ...ticket, inactivityReminder: pending });
+    const message = await channel.send({
+      content: `⏰ <@${ticket.ownerId}>, ce ticket est inactif depuis 24 h. Répondez dans ce salon principal (pas dans un fil). Sans nouveau message d’un membre dans les 24 h, le salon et tous ses messages seront définitivement supprimés, sans transcription.`,
+      allowedMentions: { parse: [], users: [ticket.ownerId] },
+      nonce: pending.nonce, enforceNonce: true,
+    });
+    ticket = this.#flushPendingActivity(ticket);
+    if (!ticket.inactivityReminder || ticket.inactivityReminder.nonce !== pending.nonce) return { activity: true };
+    if (!/^\d{17,20}$/.test(message?.id ?? '')) throw new Error('Impossible de confirmer l’envoi du rappel Discord.');
+    // Même après une réponse réseau retardée ou un renvoi dédupliqué, laisser
+    // au moins 24 h complètes après la confirmation de l'envoi.
+    const sentAt = new Date(Math.max(this.clock(), Number(message.createdTimestamp) || 0)).toISOString();
+    this.store.save({
+      ...ticket, inactivityReminder: { state: 'sent', activityAt, sentAt, messageId: message.id },
+    });
+    return { reminded: true };
+  }
+
+  async checkInactivity(guild, channelId) {
+    this.#assertGuild(guild);
+    const original = this.store.get(channelId);
+    if (!original || inactivityDueAt(original) > this.clock() || this.stopped) return {};
+    return this.locks.run(slot(original.ownerId), async () => {
+      let ticket = this.store.get(channelId);
+      if (!ticket || this.stopped) return {};
+      ticket = this.#flushPendingActivity(ticket);
+      if (inactivityDueAt(ticket) > this.clock()) return {};
+      const channel = await this.#fetchChannel(guild, ticket);
+      if (!channel || this.stopped) return {};
+      await this.#ensureInactivityPermissions(guild, channel, { deleting: ticket.inactivityReminder?.state === 'sent' });
+      const latest = await latestHumanMessageSince(channel, Date.parse(ticket.lastActivityAt ?? ticket.createdAt));
+      if (latest) ticket = this.#saveActivity(ticket, latest.createdTimestamp);
+      ticket = this.#flushPendingActivity(ticket);
+      if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
+      if (ticket.inactivityReminder?.state === 'sent') {
+        // Vérifier que l'avertissement est toujours présent et authentique.
+        await this.#ensureInactivityPermissions(guild, channel, { deleting: true });
+        let reminderMessage;
+        try {
+          reminderMessage = await channel.messages.fetch({ message: ticket.inactivityReminder.messageId, force: true, cache: false });
+        } catch (error) {
+          if (!isUnknownMessage(error)) throw error;
+        }
+        ticket = this.#flushPendingActivity(ticket);
+        if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
+        if (ticket.inactivityReminder?.state === 'sent') {
+          if (!reminderMessage) {
+            // Sans avertissement visible, prévenir à nouveau et accorder un
+            // nouveau délai complet avant toute suppression.
+            ticket = this.store.save({ ...ticket, inactivityReminder: null });
+          } else if (reminderMessage.id !== ticket.inactivityReminder.messageId
+            || reminderMessage.author?.id !== this.botUserId || reminderMessage.author?.bot !== true) {
+            throw new Error('Impossible de confirmer le message de rappel avant la fermeture automatique.');
+          }
+        }
+        // Dernière lecture REST aussi proche que possible de la suppression :
+        // un événement de message peut arriver en retard par la passerelle.
+        const latestAgain = await latestHumanMessageSince(channel, Date.parse(ticket.lastActivityAt ?? ticket.createdAt));
+        if (latestAgain) ticket = this.#saveActivity(ticket, latestAgain.createdTimestamp);
+        ticket = this.#flushPendingActivity(ticket);
+        if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
+        if (ticket.inactivityReminder?.state === 'sent') {
+          await this.#deleteConfirmed(guild, ticket, channel, this.botUserId, { automatic: true });
+          return { deleted: true };
+        }
+        // Une réponse plus ancienne que 24 h annule l'ancien rappel. En envoyer
+        // un nouveau au lieu de supprimer immédiatement le salon.
+      }
+      await this.#ensureInactivityPermissions(guild, channel);
+      ticket = this.#flushPendingActivity(ticket);
+      if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
+      return this.#sendInactivityReminder(channel, ticket);
+    });
+  }
+
+  async #deleteConfirmed(guild, ticket, channel, actorId, { automatic = false } = {}) {
     // Conserver l'intention AVANT l'appel Discord. Après une interruption, on
     // vérifie l'existence du salon au lieu de le supprimer sans confirmation.
     const pending = this.store.save({ ...ticket, pendingDeletion: { actorId, requestedAt: now() } });
     // Ne pas retirer un renommage encore en vol tant que la suppression peut
     // échouer : cela permet de le reprendre sans lancer deux PATCH concurrents.
     try {
-      await channel.delete(`Fermeture du ticket #${ticketNumber(ticket.number)} par ${actorId}`);
+      const reason = automatic
+        ? `Fermeture automatique du ticket #${ticketNumber(ticket.number)} après inactivité`
+        : `Fermeture du ticket #${ticketNumber(ticket.number)} par ${actorId}`;
+      await channel.delete(reason);
     } catch (error) {
       if (!isUnknownChannel(error)) {
         let stillExists;
@@ -493,6 +642,7 @@ export class TicketService {
       return { ticket: this.store.markDeleted(ticket.channelId) };
     } finally {
       // Même en cas d'échec disque, Discord a confirmé la disparition du salon.
+      this.pendingActivity.delete(ticket.channelId);
       this.names.cancel(ticket.channelId);
     }
   }
@@ -519,6 +669,7 @@ export class TicketService {
         ...ticket, status: 'waiting', assignedTo: null, progressDetail: null,
         assignmentRevision: (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== null),
         closedAt: null, closedBy: null, closedPermissions: null, updatedAt: now(),
+        lastActivityAt: new Date(this.clock()).toISOString(), inactivityReminder: null,
       };
       const before = snapshotOwnerWrites(channel, ticket.ownerId);
       return this.#commitTransition(guild, channel, ticket, next, actorId, { before, after: saved });
@@ -543,6 +694,7 @@ export class TicketService {
 
   async channelDeleted(channel) {
     if (channel.guildId !== this.config.guildId) return;
+    this.pendingActivity.delete(channel.id);
     this.names.cancel(channel.id);
     const ticket = this.store.get(channel.id);
     if (!ticket || ticket.status === 'deleted') return;
@@ -656,6 +808,7 @@ export class TicketService {
 
   stop() {
     this.stopped = true;
+    this.pendingActivity.clear();
     this.names.stop();
   }
 

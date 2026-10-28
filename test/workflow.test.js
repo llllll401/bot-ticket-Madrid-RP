@@ -9,7 +9,7 @@ import { createInteractionHandler } from '../src/interactions.js';
 import { closedOwnerWrites, snapshotOwnerWrites } from '../src/permissions.js';
 import { TicketStore } from '../src/store.js';
 import { TicketService } from '../src/ticket-service.js';
-import { IDS } from '../src/ui.js';
+import { IDS, TICKET_PANEL_VERSION } from '../src/ui.js';
 
 const GUILD = '100000000000000001';
 const OTHER_GUILD = '100000000000000002';
@@ -851,7 +851,7 @@ test('les anciens panneaux sont mis à niveau sans nouvelles mentions, avec repr
   assert.equal(h.store.get(channel.id).panelVersion, undefined);
   panel.failEdit = false;
   await h.service.refreshOutdatedPanels(h.guild);
-  assert.equal(h.store.get(channel.id).panelVersion, 5);
+  assert.equal(h.store.get(channel.id).panelVersion, TICKET_PANEL_VERSION);
   assert.equal(channel.sent.length, messagesBefore);
   assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
   const ids = panel.payload.components.flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
@@ -2013,7 +2013,7 @@ test('les panneaux de version 4 retrouvent le bouton sans nouvelle mention', asy
   assert.equal(assignmentButton(h, channel), undefined);
   const messagesBefore = channel.sent.length;
   await h.service.refreshOutdatedPanels(h.guild);
-  assert.equal(h.store.get(channel.id).panelVersion, 5);
+  assert.equal(h.store.get(channel.id).panelVersion, TICKET_PANEL_VERSION);
   assert.equal(assignmentButton(h, channel).label, 'Prendre en charge / laisser');
   assert.equal(channel.sent.length, messagesBefore);
   assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
@@ -2101,4 +2101,74 @@ test('les droits sont revérifiés après l’attente du verrou du ticket', asyn
   assert.match(click.response.content, /droits ont changé/);
   assert.equal(h.store.get(channel.id).assignedTo, null);
   assert.equal(h.store.get(channel.id).status, 'waiting');
+});
+
+test('le bouton staff rappelle uniquement le créateur sans changer le chronomètre', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const before = h.store.get(channel.id);
+  const panel = channel.messageMap.get(before.panelMessageId).payload;
+  const button = panel.components[0].toJSON().components.find((item) => item.custom_id === IDS.remindOwner);
+  assert.equal(button.label, 'Rappeler le membre');
+  const denied = await press(h, channel, IDS.remindOwner, { userId: OWNER });
+  assert.match(denied.response.content, /Seule l’équipe/);
+  const noView = await press(h, channel, IDS.remindOwner, { ...staffAccess, permissions: [] });
+  assert.match(noView.response.content, /voir ce salon/);
+  const revoked = await press(h, channel, IDS.remindOwner, { ...staffAccess, freshRoles: [] });
+  assert.match(revoked.response.content, /droits ont changé/);
+  const count = channel.sent.length;
+  const sent = await press(h, channel, IDS.remindOwner, staffAccess);
+  assert.equal(sent.deferOptions.flags, MessageFlags.Ephemeral);
+  assert.match(sent.response.content, /Rappel envoyé/);
+  assert.equal(channel.sent.length, count + 1);
+  assert.match(channel.sent.at(-1).payload.content, new RegExp(`<@${OWNER}>`));
+  assert.deepEqual(channel.sent.at(-1).payload.allowedMentions, { parse: [], users: [OWNER] });
+  assert.equal(h.store.get(channel.id).lastActivityAt, before.lastActivityAt);
+  assert.equal(h.store.get(channel.id).inactivityReminder, before.inactivityReminder);
+  assert.equal(h.store.get(channel.id).status, before.status);
+});
+
+test('le panneau de version 5 reçoit le bouton de rappel au démarrage', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const ticket = h.store.get(channel.id);
+  h.store.save({ ...ticket, panelVersion: 5 });
+  const panel = channel.messageMap.get(ticket.panelMessageId);
+  const row = panel.payload.components[0].toJSON();
+  row.components = row.components.filter((item) => item.custom_id !== IDS.remindOwner);
+  panel.payload.components = [{ toJSON: () => row }];
+  const count = channel.sent.length;
+  await h.service.refreshOutdatedPanels(h.guild);
+  assert.equal(h.store.get(channel.id).panelVersion, TICKET_PANEL_VERSION);
+  assert.ok(panel.payload.components[0].toJSON().components.some((item) => item.custom_id === IDS.remindOwner));
+  assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
+  assert.equal(channel.sent.length, count);
+});
+
+test('rouvrir un ancien ticket redémarre le délai d’inactivité', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const legacy = await makeLegacyClosed(h, channel);
+  const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+  h.store.save({ ...legacy, createdAt: oldTime, lastActivityAt: oldTime });
+  const before = Date.now();
+  const reopened = await press(h, channel, IDS.reopen, { userId: STAFF, roles: [ROLE] });
+  assert.match(reopened.response.content, /Ticket rouvert/);
+  const ticket = h.store.get(channel.id);
+  assert.ok(Date.parse(ticket.lastActivityAt) >= before);
+  assert.equal(ticket.inactivityReminder, null);
+  assert.equal(ticket.status, 'waiting');
+});
+
+test('le rappel manuel est refusé pour un ancien ticket fermé et sur les autres serveurs', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const foreign = interaction(h.guild, { channel, customId: IDS.remindOwner, ...staffAccess, guildId: OTHER_GUILD });
+  await h.handle(foreign);
+  assert.equal(foreign.response, null);
+  const count = channel.sent.length;
+  await makeLegacyClosed(h, channel);
+  const denied = await press(h, channel, IDS.remindOwner, staffAccess);
+  assert.match(denied.response.content, /ticket est fermé/);
+  assert.equal(channel.sent.length, count);
 });

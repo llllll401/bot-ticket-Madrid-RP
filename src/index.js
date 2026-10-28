@@ -2,6 +2,7 @@ import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { commands } from './commands.js';
 import { loadConfigFile } from './config.js';
 import { createInteractionHandler } from './interactions.js';
+import { InactivityMonitor } from './inactivity.js';
 import { rejectChannelRenameRateLimit } from './name-sync.js';
 import { validateGuildConfiguration } from './permissions.js';
 import { registerGuildCommands } from './register.js';
@@ -13,11 +14,12 @@ async function main() {
   const store = new TicketStore(config.dataFile, config.guildId);
   // Aucun intent privilégié ni accès au contenu des messages n'est nécessaire.
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
     rest: { rejectOnRateLimit: rejectChannelRenameRateLimit },
   });
   let service = null;
   let handleInteraction = null;
+  let inactivityMonitor = null;
 
   client.on(Events.Error, (error) => console.error('Erreur du client Discord :', error));
   client.on(Events.InteractionCreate, (interaction) => {
@@ -25,6 +27,9 @@ async function main() {
   });
   client.on(Events.ChannelDelete, (channel) => {
     if (service) void service.channelDeleted(channel).catch((error) => console.error('Erreur lors du suivi d’un salon supprimé :', error));
+  });
+  client.on(Events.MessageCreate, (message) => {
+    if (service) void service.recordMessageActivity(message).catch((error) => console.error('Erreur lors du suivi de l’activité d’un ticket :', error));
   });
 
   client.once(Events.ClientReady, async (readyClient) => {
@@ -39,6 +44,8 @@ async function main() {
       service.resumePendingRenames(guild);
       await registerGuildCommands(guild, commands);
       handleInteraction = createInteractionHandler({ config, service });
+      inactivityMonitor = new InactivityMonitor({ guild, service });
+      inactivityMonitor.start();
       void service.reconcileMissingChannels(guild)
         .then(() => service.refreshOutdatedPanels(guild))
         .catch((error) => console.error('Vérification des tickets ou mise à jour des anciens panneaux impossible :', error));
@@ -47,6 +54,7 @@ async function main() {
     } catch (error) {
       console.error('Initialisation impossible :', error.message);
       process.exitCode = 1;
+      inactivityMonitor?.stop();
       service?.stop();
       await readyClient.destroy();
     }
@@ -54,6 +62,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log('Arrêt du bot…');
+    inactivityMonitor?.stop();
     service?.stop();
     await client.destroy();
   };

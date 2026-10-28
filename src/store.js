@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { slugify, STATUSES, TYPE_BY_KEY } from './catalog.js';
 import { MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH } from './dossier.js';
+import { INACTIVITY_DELAY_MS } from './inactivity.js';
 import { OWNER_WRITE_PERMISSIONS } from './permissions.js';
 
 const SNOWFLAKE = /^\d{17,20}$/;
@@ -38,6 +39,18 @@ function validTicket(ticket, channelId, guildId) {
     || (ticket.urgent != null && typeof ticket.urgent !== 'boolean')
     || (ticket.assignmentRevision != null && (!Number.isSafeInteger(ticket.assignmentRevision) || ticket.assignmentRevision < 0))
     || (ticket.categoryRevision != null && (!Number.isSafeInteger(ticket.categoryRevision) || ticket.categoryRevision < 0))
+    || (ticket.lastActivityAt != null && !isDate(ticket.lastActivityAt))
+    || (ticket.inactivityReminder != null && (typeof ticket.inactivityReminder !== 'object'
+      || Array.isArray(ticket.inactivityReminder) || !isOpen(ticket)
+      || !isDate(ticket.inactivityReminder.activityAt)
+      || !['sending', 'sent'].includes(ticket.inactivityReminder.state)
+      || (ticket.inactivityReminder.state === 'sending' && (!isDate(ticket.inactivityReminder.attemptedAt)
+        || Date.parse(ticket.inactivityReminder.attemptedAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_DELAY_MS
+        || !/^[a-f0-9]{24}$/.test(ticket.inactivityReminder.nonce ?? '')))
+      || (ticket.inactivityReminder.state === 'sent' && (!isDate(ticket.inactivityReminder.sentAt)
+        || Date.parse(ticket.inactivityReminder.sentAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_DELAY_MS
+        || !isId(ticket.inactivityReminder.messageId)))
+      || Date.parse(ticket.inactivityReminder.activityAt) !== Date.parse(ticket.lastActivityAt ?? ticket.createdAt)))
     || (ticket.internalNotes != null && (!Array.isArray(ticket.internalNotes)
       || ticket.internalNotes.length > MAX_INTERNAL_NOTES || !ticket.internalNotes.every(isInternalNote)))
     || (ticket.pendingReclassification != null && (typeof ticket.pendingReclassification !== 'object'
@@ -66,6 +79,7 @@ function validTicket(ticket, channelId, guildId) {
     || (ticket.progressDetail !== null && (typeof ticket.progressDetail !== 'string' || ticket.progressDetail.length > 40))) {
     return false;
   }
+  if (ticket.lastActivityAt != null && Date.parse(ticket.lastActivityAt) < Date.parse(ticket.createdAt)) return false;
   if (ticket.status === 'progress' && (!ticket.progressDetail || !slugify(ticket.progressDetail))) return false;
   if (ticket.status === 'closed' && (!isDate(ticket.closedAt) || !isClosedWrites(ticket.closedPermissions))) return false;
   if (ticket.status === 'deleted' && ticket.internalNotes?.length) return false;
@@ -208,7 +222,7 @@ export class TicketStore {
       deletionRequestedAt: ticket.pendingDeletion?.requestedAt ?? null,
       // Les notes internes ne sont pas une transcription et ne survivent pas à
       // la suppression du ticket (les sauvegardes externes restent à gérer).
-      internalNotes: [], pendingReclassification: null,
+      internalNotes: [], pendingReclassification: null, inactivityReminder: null,
       pendingDeletion: null, pendingTransition: null, renamePending: false,
     });
   }

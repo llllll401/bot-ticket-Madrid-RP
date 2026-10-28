@@ -143,6 +143,16 @@ export function createInteractionHandler({ config, service, logger = console }) 
       }
       return true;
     }
+    if (button && id === IDS.remindOwner) {
+      const ticket = service.requireTicket(interaction.channelId);
+      ensureDossierAccess(interaction, ticket, config);
+      await interaction.deferReply(ephemeral);
+      await service.remindOwner(interaction.guild, interaction.channelId, interaction.user.id, {
+        expectedCategory: categoryVersion(ticket), authorize: freshDossierAuthorization(interaction, config),
+      });
+      await interaction.editReply({ content: '✅ Rappel envoyé au créateur dans ce ticket.', allowedMentions: { parse: [] } });
+      return true;
+    }
     if (button && id === IDS.manage) {
       const ticket = service.requireTicket(interaction.channelId);
       ensureDossierAccess(interaction, ticket, config);
