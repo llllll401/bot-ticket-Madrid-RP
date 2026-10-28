@@ -34,11 +34,14 @@ async function main() {
       service = new TicketService({ config, store, botUserId: readyClient.user.id });
       await service.recoverPendingDeletions(guild);
       await service.recoverPendingTransitions(guild);
+      await service.recoverPendingReclassifications(guild);
       await service.syncConfiguredRoles(guild);
       service.resumePendingRenames(guild);
       await registerGuildCommands(guild, commands);
       handleInteraction = createInteractionHandler({ config, service });
-      void service.refreshOutdatedPanels(guild).catch((error) => console.error('Mise à jour des anciens panneaux impossible :', error));
+      void service.reconcileMissingChannels(guild)
+        .then(() => service.refreshOutdatedPanels(guild))
+        .catch((error) => console.error('Vérification des tickets ou mise à jour des anciens panneaux impossible :', error));
       console.log(`Bot connecté en tant que ${readyClient.user.tag}. Serveur autorisé : ${config.guildId}.`);
       console.log('Utilisez /panneau-tickets dans le salon où publier le menu.');
     } catch (error) {

@@ -13,7 +13,7 @@ import { rejectChannelRenameRateLimit } from '../src/name-sync.js';
 import { REQUIRED_BOT_PERMISSIONS, ticketOverwrites, validateGuildConfiguration } from '../src/permissions.js';
 import { registerGuildCommands } from '../src/register.js';
 import { TicketStore } from '../src/store.js';
-import { IDS, publicPanel, ticketPanel } from '../src/ui.js';
+import { categoryConfirmation, dossierCategory, dossierMenu, dossierPriority, dossierRoleSelector, IDS, internalNoteModal, internalNotesPage, publicPanel, roleMessageModal, ticketPanel } from '../src/ui.js';
 
 const GUILD = '100000000000000001';
 const OTHER_GUILD = '100000000000000002';
@@ -148,13 +148,17 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   const button = (panel, id) => panel.components.flatMap((row) => row.toJSON().components).find((item) => item.custom_id === id);
   const open = ticketPanel(record());
   assert.equal(open.embeds[0].toJSON().fields[1].value, '🔴 En attente');
-  assert.equal(Boolean(button(open, IDS.claim).disabled), false);
-  assert.equal(Boolean(button(open, IDS.waiting).disabled), false);
-  assert.ok(button(open, IDS.urgent));
+  assert.equal(Boolean(button(open, IDS.manage).disabled), false);
+  assert.equal(Boolean(button(open, IDS.close).disabled), false);
+  assert.equal(button(open, IDS.claim), undefined);
+  assert.equal(button(open, IDS.waiting), undefined);
+  assert.equal(button(open, IDS.urgent), undefined);
   assert.equal(button(open, IDS.reopen), undefined);
   const urgent = ticketPanel({ ...record(), urgent: true });
-  assert.ok(button(urgent, IDS.normal));
   assert.match(urgent.embeds[0].toJSON().fields[3].value, /Urgente/);
+  const menu = dossierMenu(record(), OWNER);
+  const options = menu.components[0].toJSON().components[0].options.map((option) => option.value);
+  assert.deepEqual(options, ['claim', 'progress', 'resolve', 'waiting', 'priority', 'category', 'note-add', 'note-list', 'role']);
   const closed = ticketPanel({ ...record(), status: 'closed' });
   assert.equal(button(closed, IDS.claim), undefined);
   assert.equal(button(closed, IDS.waiting), undefined);
@@ -363,4 +367,59 @@ test('le registre accepte les anciennes données mais refuse une priorité ou un
   ]) assert.throws(() => store.save({ ...legacy, ...invalid }), /ticket invalide/);
   assert.equal(store.get(CHANNEL).status, 'waiting');
   assert.equal(store.findOpen(OWNER, 'plainte').channelId, CHANNEL);
+});
+
+test('le menu dossier et ses formulaires respectent les limites Discord, même avec des IDs de 20 chiffres', () => {
+  const viewer = '18446744073709551615';
+  const roleId = '18446744073709551614';
+  const item = { ...record(), type: 'demande_unban', categoryRevision: Number.MAX_SAFE_INTEGER };
+  const payloads = [dossierMenu(item, viewer), dossierPriority(item, viewer), dossierCategory(item, viewer),
+    categoryConfirmation(item, viewer, 'partenariat'), dossierRoleSelector(viewer), internalNotesPage([], viewer)];
+  for (const payload of payloads) {
+    for (const row of payload.components) {
+      const components = row.toJSON().components;
+      assert.ok(components.length <= 5);
+      const ids = components.map((component) => component.custom_id);
+      assert.equal(new Set(ids).size, ids.length);
+      assert.ok(ids.every((id) => id.length <= 100));
+    }
+    for (const embed of payload.embeds) embed.toJSON();
+  }
+  assert.ok(internalNoteModal(item, viewer).toJSON().custom_id.length <= 100);
+  assert.ok(roleMessageModal(item, viewer, roleId).toJSON().custom_id.length <= 100);
+  const extreme = [0, 1].map(() => ({ authorId: viewer, createdAt: '2026-01-01T00:00:00.000Z', text: '*'.repeat(800) }));
+  assert.ok(internalNotesPage(extreme, viewer).embeds[0].toJSON().description.length <= 4096);
+});
+
+test('le registre réserve les deux types d’une reclassification et refuse les journaux et notes invalides', (t) => {
+  const file = path.join(tempDir(t), 'tickets.json');
+  const store = new TicketStore(file, GUILD);
+  store.allocateNumber();
+  const original = record();
+  store.save(original);
+  assert.throws(() => store.save({ ...original, type: 'question' }), /reclassification préparée/);
+  const pending = {
+    ...original, pendingReclassification: {
+      targetType: 'question', actorId: OWNER, requestedAt: '2026-01-01T00:00:00.000Z', candidateRoleIds: [ROLE],
+    },
+  };
+  store.save(pending);
+  assert.equal(store.findOpen(OWNER, 'plainte').channelId, CHANNEL);
+  assert.equal(store.findOpen(OWNER, 'question').channelId, CHANNEL);
+  assert.equal(new TicketStore(file, GUILD).findOpen(OWNER, 'question').channelId, CHANNEL);
+  store.allocateNumber();
+  assert.throws(() => store.save({ ...record(2), channelId: '500000000000000002', type: 'question' }), /déjà ouvert/);
+  for (const bad of [
+    { pendingReclassification: { ...pending.pendingReclassification, targetType: 'plainte' } },
+    { pendingReclassification: { ...pending.pendingReclassification, actorId: 'bad' } },
+    { pendingReclassification: { ...pending.pendingReclassification, candidateRoleIds: [GUILD] } },
+    { internalNotes: [{ authorId: OWNER, createdAt: '2026-01-01T00:00:00.000Z', text: ' '.repeat(10) }] },
+    { internalNotes: [{ authorId: OWNER, createdAt: '2026-01-01T00:00:00.000Z', text: 'x'.repeat(801) }] },
+    { categoryRevision: -1 },
+  ]) assert.throws(() => store.save({ ...pending, ...bad }), /ticket invalide/);
+  const committed = store.save({ ...pending, type: 'question', pendingReclassification: null });
+  assert.equal(committed.type, 'question');
+  assert.equal(store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(store.findOpen(OWNER, 'question').channelId, CHANNEL);
+  assert.equal(new TicketStore(file, GUILD).findOpen(OWNER, 'question').channelId, CHANNEL);
 });
