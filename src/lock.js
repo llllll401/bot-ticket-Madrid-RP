@@ -1,4 +1,4 @@
-// Sérialise les opérations d'un même propriétaire/type, sans bloquer les autres.
+// Sérialise les opérations partageant une clé, sans bloquer les autres.
 export class KeyedLock {
   #tails = new Map();
 

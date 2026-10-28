@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { slugify, STATUSES, TYPE_BY_KEY } from './catalog.js';
+import { MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH } from './dossier.js';
 import { OWNER_WRITE_PERMISSIONS } from './permissions.js';
 
 const SNOWFLAKE = /^\d{17,20}$/;
@@ -13,6 +14,13 @@ const isClosedWrites = (value) => value && typeof value === 'object' && !Array.i
   && OWNER_WRITE_PERMISSIONS.every((name) => [true, false, null].includes(value[name]));
 const isOpen = (ticket) => !['closed', 'deleted'].includes(ticket.status);
 const slot = (ticket) => `${ticket.ownerId}:${ticket.type}`;
+const activeSlotsForTicket = (ticket) => !isOpen(ticket) ? [] : [
+  slot(ticket),
+  ...(ticket.pendingReclassification ? [`${ticket.ownerId}:${ticket.pendingReclassification.targetType}`] : []),
+];
+const isInternalNote = (note) => note && typeof note === 'object' && !Array.isArray(note)
+  && isId(note.authorId) && isDate(note.createdAt) && typeof note.text === 'string'
+  && Boolean(note.text.trim()) && note.text.length <= MAX_INTERNAL_NOTE_LENGTH;
 
 function validTicket(ticket, channelId, guildId) {
   if (!ticket || typeof ticket !== 'object' || Array.isArray(ticket)
@@ -29,6 +37,18 @@ function validTicket(ticket, channelId, guildId) {
     || (ticket.renamePending != null && typeof ticket.renamePending !== 'boolean')
     || (ticket.urgent != null && typeof ticket.urgent !== 'boolean')
     || (ticket.assignmentRevision != null && (!Number.isSafeInteger(ticket.assignmentRevision) || ticket.assignmentRevision < 0))
+    || (ticket.categoryRevision != null && (!Number.isSafeInteger(ticket.categoryRevision) || ticket.categoryRevision < 0))
+    || (ticket.internalNotes != null && (!Array.isArray(ticket.internalNotes)
+      || ticket.internalNotes.length > MAX_INTERNAL_NOTES || !ticket.internalNotes.every(isInternalNote)))
+    || (ticket.pendingReclassification != null && (typeof ticket.pendingReclassification !== 'object'
+      || Array.isArray(ticket.pendingReclassification) || !isOpen(ticket)
+      || !Object.hasOwn(TYPE_BY_KEY, ticket.pendingReclassification.targetType)
+      || ticket.pendingReclassification.targetType === ticket.type
+      || !isId(ticket.pendingReclassification.actorId) || !isDate(ticket.pendingReclassification.requestedAt)
+      || !Array.isArray(ticket.pendingReclassification.candidateRoleIds)
+      || !ticket.pendingReclassification.candidateRoleIds.length
+      || ticket.pendingReclassification.candidateRoleIds.some((role) => !isId(role) || role === guildId)
+      || new Set(ticket.pendingReclassification.candidateRoleIds).size !== ticket.pendingReclassification.candidateRoleIds.length))
     || (ticket.panelVersion != null && (!Number.isSafeInteger(ticket.panelVersion) || ticket.panelVersion < 1))
     || (ticket.closedBy != null && !isId(ticket.closedBy))
     || (ticket.deletedBy != null && !isId(ticket.deletedBy))
@@ -48,6 +68,7 @@ function validTicket(ticket, channelId, guildId) {
   }
   if (ticket.status === 'progress' && (!ticket.progressDetail || !slugify(ticket.progressDetail))) return false;
   if (ticket.status === 'closed' && (!isDate(ticket.closedAt) || !isClosedWrites(ticket.closedPermissions))) return false;
+  if (ticket.status === 'deleted' && ticket.internalNotes?.length) return false;
   if (ticket.status !== 'deleted' && (ticket.deletedBy != null || ticket.deletionRequestedAt != null)) return false;
   if (!['closed', 'deleted'].includes(ticket.status)
     && (ticket.closedAt !== null || ticket.closedBy != null || ticket.closedPermissions !== null || ticket.deletedAt !== null)) return false;
@@ -70,8 +91,7 @@ function validateData(data, guildId) {
       throw new Error('Le fichier contient des tickets invalides.');
     }
     numbers.set(ticket.number, channelId);
-    if (isOpen(ticket)) {
-      const key = slot(ticket);
+    for (const key of activeSlotsForTicket(ticket)) {
       if (activeSlots.has(key)) throw new Error('Le fichier contient plusieurs tickets ouverts pour un même membre et type.');
       activeSlots.set(key, channelId);
     }
@@ -145,14 +165,20 @@ export class TicketStore {
       throw new Error('Impossible d’enregistrer un ticket invalide.');
     }
     const previous = this.#data.tickets[ticket.channelId];
-    if (previous && (previous.number !== ticket.number || previous.ownerId !== ticket.ownerId || previous.type !== ticket.type)) {
+    if (previous && (previous.number !== ticket.number || previous.ownerId !== ticket.ownerId)) {
       throw new Error('L’identité d’un ticket existant ne peut pas être modifiée.');
+    }
+    if (previous && previous.type !== ticket.type
+      && (previous.pendingReclassification?.targetType !== ticket.type || ticket.pendingReclassification != null)) {
+      throw new Error('Le type ne peut changer que par une reclassification préparée.');
     }
     const numberOwner = this.#numbers.get(ticket.number);
     if (numberOwner && numberOwner !== ticket.channelId) throw new Error('Ce numéro de ticket est déjà utilisé.');
-    const activeOwner = this.#activeSlots.get(slot(ticket));
-    if (isOpen(ticket) && activeOwner && activeOwner !== ticket.channelId) {
-      throw new Error('Un ticket est déjà ouvert pour ce membre et ce type.');
+    for (const key of activeSlotsForTicket(ticket)) {
+      const activeOwner = this.#activeSlots.get(key);
+      if (activeOwner && activeOwner !== ticket.channelId) {
+        throw new Error('Un ticket est déjà ouvert pour ce membre et ce type.');
+      }
     }
     // Les enregistrements internes ne sont jamais exposés sans copie. On ne recopie
     // donc que la table et le ticket modifié avant l'écriture atomique sur disque.
@@ -160,8 +186,12 @@ export class TicketStore {
     this.#commit(next);
     // Ne changer les index qu'après le succès de l'écriture : ils doivent toujours
     // refléter le fichier si un disque plein ou une erreur de permissions survient.
-    if (previous && isOpen(previous)) this.#activeSlots.delete(slot(previous));
-    if (isOpen(ticket)) this.#activeSlots.set(slot(ticket), ticket.channelId);
+    if (previous) {
+      for (const key of activeSlotsForTicket(previous)) {
+        if (this.#activeSlots.get(key) === ticket.channelId) this.#activeSlots.delete(key);
+      }
+    }
+    for (const key of activeSlotsForTicket(ticket)) this.#activeSlots.set(key, ticket.channelId);
     this.#numbers.set(ticket.number, ticket.channelId);
     return structuredClone(ticket);
   }
@@ -176,6 +206,9 @@ export class TicketStore {
       closedBy: ticket.closedBy ?? (ticket.status === 'closed' ? null : (ticket.pendingDeletion?.actorId ?? null)),
       deletedBy: ticket.pendingDeletion?.actorId ?? null,
       deletionRequestedAt: ticket.pendingDeletion?.requestedAt ?? null,
+      // Les notes internes ne sont pas une transcription et ne survivent pas à
+      // la suppression du ticket (les sauvegardes externes restent à gérer).
+      internalNotes: [], pendingReclassification: null,
       pendingDeletion: null, pendingTransition: null, renamePending: false,
     });
   }

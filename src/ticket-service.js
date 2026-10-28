@@ -1,12 +1,14 @@
-import { ChannelType, OverwriteType, escapeMarkdown } from 'discord.js';
+import { ChannelType, OverwriteType, PermissionFlagsBits, escapeMarkdown } from 'discord.js';
 import { channelName, slugify, statusLabel, ticketNumber, TYPE_BY_KEY } from './catalog.js';
+import { cleanDossierText, MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 import { isFullCategory, isServerChannelLimit, isUnknownChannel, isUnknownMessage, UserError } from './errors.js';
 import { KeyedLock } from './lock.js';
 import { ChannelNameSynchronizer } from './name-sync.js';
 import { snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
 import { initialTicketMessage, ticketPanel, TICKET_PANEL_VERSION } from './ui.js';
 
-const slot = (ownerId, type) => `${ownerId}:${type}`;
+// Un verrou par propriétaire protège aussi les déplacements entre deux types.
+const slot = (ownerId) => ownerId;
 const now = () => new Date().toISOString();
 
 export class TicketService {
@@ -64,14 +66,24 @@ export class TicketService {
     return restored;
   }
 
-  async #withTicket(guild, channelId, action, { restoreTransition = true } = {}) {
+  async #withTicket(guild, channelId, action, {
+    restoreTransition = true, allowPendingReclassification = false, expectedCategory = null, authorize = null,
+  } = {}) {
     this.#assertGuild(guild);
     const original = this.requireTicket(channelId);
-    return this.locks.run(slot(original.ownerId, original.type), async () => {
+    return this.locks.run(slot(original.ownerId), async () => {
       let ticket = this.requireTicket(channelId);
       const channel = await this.#fetchChannel(guild, ticket);
       if (!channel) throw new UserError('Ce salon de ticket n’existe plus.');
       if (ticket.pendingDeletion) ticket = this.#clearPendingDeletion(guild, ticket);
+      if (ticket.pendingReclassification && !allowPendingReclassification) {
+        throw new UserError('Un changement de catégorie est interrompu. Un administrateur doit vérifier les droits et redémarrer le bot.');
+      }
+      if (expectedCategory && (ticket.type !== expectedCategory.type
+        || (ticket.categoryRevision ?? 0) !== expectedCategory.revision)) {
+        throw new UserError('La catégorie du ticket a changé. Relancez cette action.');
+      }
+      if (authorize) await authorize(ticket, channel);
       if (ticket.pendingTransition && restoreTransition) ticket = await this.#restoreTransition(guild, channel, ticket);
       return action(ticket, channel);
     });
@@ -84,17 +96,21 @@ export class TicketService {
     const type = TYPE_BY_KEY[typeKey];
     const categoryId = this.config.categoryIdsByType[typeKey];
     if (!categoryId) throw new Error(`ID de catégorie manquant pour ${type.label} dans config.json.`);
-    return this.locks.run(slot(user.id, typeKey), async () => {
+    return this.locks.run(slot(user.id), async () => {
       const existing = await this.#findExisting(guild, user.id, typeKey);
+      if (existing?.pendingReclassification) {
+        throw new UserError('Un changement de catégorie pour l’un de vos tickets est en cours. Prévenez l’équipe avant de réessayer.');
+      }
       if (existing) return { created: false, ticket: existing };
 
       const createdAt = now();
       const ticket = {
         channelId: '', number: this.store.allocateNumber(), type: typeKey,
         ownerId: user.id, ownerName: user.globalName || user.username || 'membre',
-        status: 'waiting', assignedTo: null, assignmentRevision: 0, progressDetail: null, urgent: false,
-        staffRoleIds: [...this.config.staffRolesByType[typeKey]], roleSyncPending: null,
-        pendingTransition: null, pendingDeletion: null, renamePending: false, panelMessageId: null, panelVersion: null,
+        status: 'waiting', assignedTo: null, assignmentRevision: 0, categoryRevision: 0, progressDetail: null, urgent: false,
+        staffRoleIds: [...this.config.staffRolesByType[typeKey]], roleSyncPending: null, internalNotes: [],
+        pendingTransition: null, pendingDeletion: null, pendingReclassification: null,
+        renamePending: false, panelMessageId: null, panelVersion: null,
         createdAt, updatedAt: createdAt, closedAt: null, closedBy: null, closedPermissions: null,
         deletedAt: null, deletedBy: null, deletionRequestedAt: null,
       };
@@ -230,7 +246,7 @@ export class TicketService {
     return { ticket: this.store.get(oldTicket.channelId), warning: warnings.join(' ') };
   }
 
-  async setStatus(guild, channelId, status, actorId, detail = '', { expectedAssignee, expectedAssignmentRevision } = {}) {
+  async setStatus(guild, channelId, status, actorId, detail = '', { expectedAssignee, expectedAssignmentRevision, expectedCategory, authorize } = {}) {
     if (!['waiting', 'claimed', 'progress', 'resolved'].includes(status)) throw new Error('Transition de statut invalide.');
     const cleanedDetail = String(detail).replace(/\s+/g, ' ').trim();
     if (status === 'progress' && (cleanedDetail.length < 2 || cleanedDetail.length > 40 || !slugify(cleanedDetail))) {
@@ -256,10 +272,10 @@ export class TicketService {
       const assignmentRevision = (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== assignedTo);
       const next = { ...ticket, status, progressDetail, assignedTo, assignmentRevision, updatedAt: now() };
       return this.#commitTransition(guild, channel, ticket, next, actorId);
-    });
+    }, { expectedCategory, authorize });
   }
 
-  async setUrgent(guild, channelId, urgent, actorId) {
+  async setUrgent(guild, channelId, urgent, actorId, { expectedCategory, authorize } = {}) {
     if (typeof urgent !== 'boolean') throw new Error('Priorité invalide.');
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
@@ -283,7 +299,140 @@ export class TicketService {
         warnings.push('Le message de suivi n’a pas pu être envoyé.');
       }
       return { ticket: this.store.get(channelId), warning: warnings.join(' ') };
+    }, { expectedCategory, authorize });
+  }
+
+  async #applyReclassification(guild, channel, ticket) {
+    const journal = ticket.pendingReclassification;
+    const targetType = journal.targetType;
+    const desired = this.config.staffRolesByType[targetType];
+    const categoryId = this.config.categoryIdsByType[targetType];
+    const candidates = [...new Set([...journal.candidateRoleIds, ...ticket.staffRoleIds, ...(ticket.roleSyncPending ?? []), ...desired])];
+    if (candidates.length !== journal.candidateRoleIds.length) {
+      // Inclure les rôles d'une configuration modifiée avant de toucher Discord.
+      ticket = this.store.save({ ...ticket, pendingReclassification: { ...journal, candidateRoleIds: candidates } });
+    }
+    const reason = `Changement de catégorie du ticket #${ticketNumber(ticket.number)} par ${journal.actorId}`;
+    // Retirer les anciens rôles AVANT d'accorder les nouveaux ; ne pas toucher
+    // aux accès manuels d'autres rôles ou membres, ni synchroniser la catégorie.
+    for (const roleId of candidates) {
+      if (!desired.includes(roleId) && channel.permissionOverwrites.cache.has(roleId)) {
+        await channel.permissionOverwrites.delete(roleId, reason);
+      }
+    }
+    for (const roleId of desired) {
+      await channel.permissionOverwrites.edit(roleId, STAFF_ACCESS, { type: OverwriteType.Role, reason });
+    }
+    await channel.edit({
+      parent: categoryId, lockPermissions: false,
+      topic: `Ticket #${ticketNumber(ticket.number)} | ${TYPE_BY_KEY[targetType].label} | Créateur : ${ticket.ownerId}`,
+      reason,
     });
+    const next = this.store.save({
+      ...ticket, type: targetType, categoryRevision: (ticket.categoryRevision ?? 0) + 1,
+      status: 'waiting', assignedTo: null, progressDetail: null,
+      assignmentRevision: (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== null),
+      staffRoleIds: [...desired], roleSyncPending: null, pendingReclassification: null,
+      renamePending: true, updatedAt: now(),
+    });
+    this.names.schedule(guild, channel.id);
+    const warnings = [];
+    try { await this.#refreshPanel(channel, next); }
+    catch (error) {
+      this.logger.error('Catégorie changée, mais panneau non actualisé :', error);
+      warnings.push('Le panneau n’a pas pu être actualisé : utilisez /ticket-panneau.');
+    }
+    try {
+      await channel.send({
+        content: `🔄 Catégorie : **${TYPE_BY_KEY[targetType].label}**. Le ticket est remis en attente.`,
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      this.logger.error('Catégorie changée, mais message de suivi non envoyé :', error);
+      warnings.push('Le message de suivi n’a pas pu être envoyé.');
+    }
+    return { ticket: this.store.get(channel.id), warning: warnings.join(' ') };
+  }
+
+  async changeCategory(guild, channelId, targetType, actorId, { expectedCategory, authorize } = {}) {
+    if (!Object.hasOwn(TYPE_BY_KEY, targetType)) throw new UserError('Choisissez une catégorie valide.');
+    return this.#withTicket(guild, channelId, async (ticket, channel) => {
+      if (ticket.status === 'closed') throw new UserError('Rouvrez cet ancien ticket avant de changer sa catégorie.');
+      if (ticket.type === targetType) return { ticket, warning: '', unchanged: true };
+      const existing = await this.#findExisting(guild, ticket.ownerId, targetType);
+      if (existing) throw new UserError('Ce membre possède déjà un ticket ouvert dans la catégorie choisie.');
+      const pending = this.store.save({
+        ...ticket, pendingReclassification: {
+          targetType, actorId, requestedAt: now(),
+          candidateRoleIds: [...new Set([...ticket.staffRoleIds, ...(ticket.roleSyncPending ?? []), ...this.config.staffRolesByType[targetType]])],
+        },
+      });
+      try {
+        return await this.#applyReclassification(guild, channel, pending);
+      } catch (error) {
+        this.logger.error('Changement de catégorie interrompu :', error);
+        // Si le salon a disparu, finaliser sa suppression ; sinon conserver le
+        // journal et les deux emplacements réservés jusqu'à la reprise.
+        let channelExists = null;
+        try { channelExists = Boolean(await this.#fetchChannel(guild, pending)); }
+        catch (checkError) { this.logger.error('Impossible de vérifier le salon après interruption :', checkError); }
+        if (channelExists === false) throw new UserError('Le salon de ce ticket n’existe plus.');
+        if (isFullCategory(error)) {
+          throw new UserError('La catégorie Discord est pleine et certains accès ont pu changer. Prévenez un administrateur, libérez de la place puis redémarrez le bot.');
+        }
+        throw new UserError('Le changement de catégorie est interrompu et certains accès ont pu changer. Prévenez un administrateur, vérifiez les droits puis redémarrez le bot.');
+      }
+    }, { expectedCategory, authorize });
+  }
+
+  async addInternalNote(guild, channelId, actorId, value, { expectedCategory, authorize } = {}) {
+    const text = cleanDossierText(value, MAX_INTERNAL_NOTE_LENGTH, 'La note interne');
+    return this.#withTicket(guild, channelId, async (ticket) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      const notes = ticket.internalNotes ?? [];
+      if (notes.length >= MAX_INTERNAL_NOTES) throw new UserError(`Ce dossier contient déjà ${MAX_INTERNAL_NOTES} notes internes.`);
+      const saved = this.store.save({
+        ...ticket, internalNotes: [...notes, { authorId: actorId, createdAt: now(), text }],
+      });
+      // Une note interne ne doit jamais être publiée dans le salon du membre.
+      return { count: saved.internalNotes.length };
+    }, { expectedCategory, authorize });
+  }
+
+  async getInternalNotes(guild, channelId, { expectedCategory, authorize } = {}) {
+    return this.#withTicket(guild, channelId, async (ticket) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      return ticket.internalNotes ?? [];
+    }, { expectedCategory, authorize });
+  }
+
+  async notifyRole(guild, channelId, actorId, roleId, value, { expectedCategory, authorize } = {}) {
+    const text = cleanDossierText(value, MAX_ROLE_MESSAGE_LENGTH, 'Le message au rôle');
+    if (typeof roleId !== 'string' || !/^\d{17,20}$/.test(roleId) || roleId === guild.id) {
+      throw new UserError('Choisissez un rôle du serveur autre que @everyone.');
+    }
+    return this.#withTicket(guild, channelId, async (ticket, channel) => {
+      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé.');
+      let role;
+      try { role = await guild.roles.fetch(roleId, { force: true }); }
+      catch (error) {
+        if (Number(error?.code) !== 10011) throw error;
+      }
+      if (!role || role.id !== roleId || role.guild?.id !== guild.id) throw new UserError('Ce rôle est introuvable sur ce serveur.');
+      if (!role.mentionable) {
+        const bot = await guild.members.fetchMe({ force: true });
+        if (!channel.permissionsFor(bot)?.has(PermissionFlagsBits.MentionEveryone)) {
+          throw new UserError('Ce rôle n’est pas mentionnable. Rendez-le mentionnable ou autorisez le bot à mentionner les rôles dans ce salon.');
+        }
+      }
+      await channel.send({
+        content: `<@&${roleId}> • Demande de <@${actorId}> :\n${escapeMarkdown(text)}`,
+        // Même si le texte contient @everyone, un utilisateur ou un autre rôle,
+        // seul le rôle choisi peut être notifié.
+        allowedMentions: { parse: [], roles: [roleId] },
+      });
+      return { roleId };
+    }, { expectedCategory, authorize });
   }
 
   async #deleteConfirmed(guild, ticket, channel, actorId) {
@@ -324,14 +473,14 @@ export class TicketService {
 
   // Une suppression confirmée ne nécessite pas de restaurer les permissions
   // d'une transition inachevée ; si elle échoue, son journal reste intact.
-  async close(guild, channelId, actorId) {
+  async close(guild, channelId, actorId, { expectedCategory } = {}) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       if (ticket.status === 'closed') throw new UserError('Cet ancien ticket est déjà fermé. Utilisez Supprimer pour retirer son salon.');
       return this.#deleteConfirmed(guild, ticket, channel, actorId);
-    }, { restoreTransition: false });
+    }, { restoreTransition: false, allowPendingReclassification: true, expectedCategory });
   }
 
-  async reopen(guild, channelId, actorId) {
+  async reopen(guild, channelId, actorId, { expectedCategory } = {}) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       if (ticket.status !== 'closed') throw new UserError('Ce ticket n’est pas fermé.');
       const existing = await this.#findExisting(guild, ticket.ownerId, ticket.type);
@@ -347,23 +496,23 @@ export class TicketService {
       };
       const before = snapshotOwnerWrites(channel, ticket.ownerId);
       return this.#commitTransition(guild, channel, ticket, next, actorId, { before, after: saved });
-    });
+    }, { expectedCategory });
   }
 
-  async delete(guild, channelId, actorId) {
+  async delete(guild, channelId, actorId, { expectedCategory } = {}) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       if (ticket.status !== 'closed') throw new UserError('Utilisez Fermer pour supprimer ce ticket.');
       return this.#deleteConfirmed(guild, ticket, channel, actorId);
-    }, { restoreTransition: false });
+    }, { restoreTransition: false, allowPendingReclassification: true, expectedCategory });
   }
 
-  async repair(guild, channelId) {
+  async repair(guild, channelId, { expectedCategory } = {}) {
     return this.#withTicket(guild, channelId, async (ticket, channel) => {
       const next = { ...ticket, renamePending: true };
       this.store.save(next);
       this.names.schedule(guild, channelId, { retryNow: true });
       return this.#refreshPanel(channel, next);
-    });
+    }, { expectedCategory });
   }
 
   async channelDeleted(channel) {
@@ -371,14 +520,14 @@ export class TicketService {
     this.names.cancel(channel.id);
     const ticket = this.store.get(channel.id);
     if (!ticket || ticket.status === 'deleted') return;
-    await this.locks.run(slot(ticket.ownerId, ticket.type), () => this.store.markDeleted(channel.id));
+    await this.locks.run(slot(ticket.ownerId), () => this.store.markDeleted(channel.id));
   }
 
   async recoverPendingDeletions(guild) {
     this.#assertGuild(guild);
     for (const stored of this.store.list()) {
       if (stored.status === 'deleted' || !stored.pendingDeletion) continue;
-      await this.locks.run(slot(stored.ownerId, stored.type), async () => {
+      await this.locks.run(slot(stored.ownerId), async () => {
         const ticket = this.store.get(stored.channelId);
         if (!ticket || ticket.status === 'deleted' || !ticket.pendingDeletion) return;
         const channel = await this.#fetchChannel(guild, ticket);
@@ -389,11 +538,24 @@ export class TicketService {
     }
   }
 
+  async recoverPendingReclassifications(guild) {
+    this.#assertGuild(guild);
+    for (const stored of this.store.list()) {
+      if (stored.status === 'deleted' || !stored.pendingReclassification) continue;
+      await this.locks.run(slot(stored.ownerId), async () => {
+        const ticket = this.store.get(stored.channelId);
+        if (!ticket || ticket.status === 'deleted' || !ticket.pendingReclassification) return;
+        const channel = await this.#fetchChannel(guild, ticket);
+        if (channel) await this.#applyReclassification(guild, channel, ticket);
+      });
+    }
+  }
+
   async recoverPendingTransitions(guild) {
     this.#assertGuild(guild);
     for (const stored of this.store.list()) {
       if (stored.status === 'deleted' || !stored.pendingTransition) continue;
-      await this.locks.run(slot(stored.ownerId, stored.type), async () => {
+      await this.locks.run(slot(stored.ownerId), async () => {
         const ticket = this.store.get(stored.channelId);
         if (!ticket || ticket.status === 'deleted' || !ticket.pendingTransition) return;
         const channel = await this.#fetchChannel(guild, ticket);
@@ -411,6 +573,36 @@ export class TicketService {
     }
   }
 
+  // Une suppression manuelle pendant l'arrêt du bot ne déclenche aucun événement.
+  // Une seule liste suffit pour les salons présents ; vérifier chaque absence par
+  // son ID avant d'effacer les notes, car une perte d'accès n'est pas une suppression.
+  async reconcileMissingChannels(guild) {
+    this.#assertGuild(guild);
+    const tickets = this.store.list().filter((ticket) => ticket.status !== 'deleted');
+    if (!tickets.length || this.stopped) return;
+    let channels;
+    // Ne pas appliquer au cache une liste qui pourrait être antérieure à une
+    // modification de permissions effectuée en parallèle sur un ticket actif.
+    try { channels = await guild.channels.fetch(undefined, { cache: false }); }
+    catch (error) {
+      this.logger.error('Impossible de vérifier les salons des tickets au démarrage :', error);
+      return;
+    }
+    for (const stored of tickets) {
+      if (this.stopped) return;
+      if (channels.has(stored.channelId)) continue;
+      try {
+        await this.locks.run(slot(stored.ownerId), async () => {
+          const ticket = this.store.get(stored.channelId);
+          if (!ticket || ticket.status === 'deleted' || this.stopped) return;
+          await this.#fetchChannel(guild, ticket);
+        });
+      } catch (error) {
+        this.logger.error(`Impossible de vérifier le salon du ticket #${ticketNumber(stored.number)} :`, error);
+      }
+    }
+  }
+
   // Les anciens panneaux gagnent les nouveaux boutons sans intervention manuelle.
   // La tâche est lancée en arrière-plan, séquentiellement et sous les mêmes verrous
   // que les actions, afin de ne pas écraser un statut modifié entre-temps.
@@ -420,9 +612,10 @@ export class TicketService {
       if (this.stopped) return;
       if (stored.status === 'deleted' || (stored.panelVersion ?? 0) >= TICKET_PANEL_VERSION) continue;
       try {
-        await this.locks.run(slot(stored.ownerId, stored.type), async () => {
+        await this.locks.run(slot(stored.ownerId), async () => {
           let ticket = this.store.get(stored.channelId);
-          if (this.stopped || !ticket || ticket.status === 'deleted' || (ticket.panelVersion ?? 0) >= TICKET_PANEL_VERSION) return;
+          if (this.stopped || !ticket || ticket.status === 'deleted' || ticket.pendingReclassification
+            || (ticket.panelVersion ?? 0) >= TICKET_PANEL_VERSION) return;
           const channel = await this.#fetchChannel(guild, ticket);
           if (!channel || this.stopped) return;
           if (ticket.pendingTransition) ticket = await this.#restoreTransition(guild, channel, ticket);
@@ -452,9 +645,10 @@ export class TicketService {
       const newSet = new Set(desired);
       const differs = oldSet.size !== newSet.size || [...oldSet].some((id) => !newSet.has(id));
       if (!differs && !stored.roleSyncPending) continue;
-      await this.locks.run(slot(stored.ownerId, stored.type), async () => {
+      await this.locks.run(slot(stored.ownerId), async () => {
         const ticket = this.store.get(stored.channelId);
         if (!ticket || ticket.status === 'deleted') return;
+        if (ticket.pendingReclassification) throw new Error('Un changement de catégorie doit être repris avant la synchronisation des rôles.');
         const channel = await this.#fetchChannel(guild, ticket);
         if (!channel) return;
         const candidates = [...new Set([...ticket.staffRoleIds, ...(ticket.roleSyncPending ?? []), ...desired])];

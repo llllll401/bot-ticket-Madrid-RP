@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ChannelType, PermissionFlagsBits, PermissionsBitField, RateLimitError } from 'discord.js';
+import { ChannelType, MessageFlags, PermissionFlagsBits, PermissionsBitField, RateLimitError } from 'discord.js';
 import { loadConfig } from '../src/config.js';
 import { createInteractionHandler } from '../src/interactions.js';
 import { closedOwnerWrites, snapshotOwnerWrites } from '../src/permissions.js';
@@ -44,7 +44,9 @@ class FakeChannel {
     this.name = options.name ?? 'tickets';
     this.type = options.type ?? ChannelType.GuildText;
     this.parentId = options.parent ?? null;
+    this.topic = options.topic ?? null;
     this.sent = [];
+    this.permissionEvents = [];
     this.renameAttempts = [];
     this.messageMap = new Map();
     this.messages = {
@@ -64,6 +66,7 @@ class FakeChannel {
     this.permissionOverwrites = {
       cache,
       edit: async (id, values) => {
+        this.permissionEvents.push(`edit:${id}`);
         if (this.failPermissionEdit) throw new Error('permission refusée');
         const current = cache.get(id) ?? { allow: new PermissionsBitField(), deny: new PermissionsBitField() };
         for (const [name, value] of Object.entries(values)) {
@@ -76,7 +79,11 @@ class FakeChannel {
         cache.set(id, current);
         return this;
       },
-      delete: async (id) => { cache.delete(id); return this; },
+      delete: async (id) => {
+        this.permissionEvents.push(`delete:${id}`);
+        if (this.failPermissionDelete) throw new Error('suppression de permission refusée');
+        cache.delete(id); return this;
+      },
     };
   }
 
@@ -117,6 +124,25 @@ class FakeChannel {
     return this;
   }
 
+  async edit(options) {
+    this.channelEditOptions = options;
+    if (this.editGate) {
+      const gate = this.editGate;
+      this.editGate = null;
+      this.onEditStart?.();
+      await gate;
+    }
+    if (this.failChannelEdit) throw this.failChannelEdit;
+    if (options.parent !== undefined) this.parentId = options.parent;
+    if (options.topic !== undefined) this.topic = options.topic;
+    return this;
+  }
+
+  permissionsFor(member) {
+    if (member.id === BOT) return new PermissionsBitField(this.botPermissions ?? []);
+    return member.channelPermissions ?? member.permissions;
+  }
+
   async delete() {
     if (this.failDelete) throw new Error('suppression impossible');
     this.deleted = true;
@@ -126,7 +152,13 @@ class FakeChannel {
 }
 
 function makeGuild() {
-  const guild = { id: GUILD, channelMap: new Map(), createCount: 0 };
+  const guild = { id: GUILD, channelMap: new Map(), roleMap: new Map(), memberMap: new Map(), createCount: 0 };
+  for (const id of [ROLE, SPECIAL_ROLE, NEW_ROLE]) guild.roleMap.set(id, { id, guild, mentionable: true });
+  guild.roles = { fetch: async (id) => id ? (guild.roleMap.get(id) ?? null) : guild.roleMap };
+  guild.members = {
+    fetchMe: async () => ({ id: BOT }),
+    fetch: async ({ user }) => guild.memberMap.get(user) ?? null,
+  };
   guild.channels = {
     create: async (options) => {
       guild.createCount++;
@@ -136,6 +168,7 @@ function makeGuild() {
       return channel;
     },
     fetch: async (id) => {
+      if (!id) return new Map(guild.channelMap);
       const channel = guild.channelMap.get(id);
       if (!channel) throw apiError(10003);
       return channel;
@@ -148,6 +181,12 @@ function interaction(guild, options = {}) {
   const kind = options.kind ?? 'button';
   const channel = options.channel ?? new FakeChannel(guild, { name: 'accueil' });
   const roles = new Set(options.roles ?? []);
+  const userId = options.userId ?? OWNER;
+  guild.memberMap.set(userId, {
+    id: userId,
+    roles: { cache: new Set(options.freshRoles ?? options.roles ?? []) },
+    permissions: new PermissionsBitField(options.freshPermissions ?? options.permissions ?? []),
+  });
   const item = {
     guild,
     guildId: options.guildId ?? guild.id,
@@ -166,6 +205,7 @@ function interaction(guild, options = {}) {
     modal: null,
     isChatInputCommand: () => kind === 'command',
     isStringSelectMenu: () => kind === 'select',
+    isRoleSelectMenu: () => kind === 'role-select',
     isButton: () => kind === 'button',
     isModalSubmit: () => kind === 'modal',
     async reply(payload) { this.replied = true; this.response = payload; },
@@ -205,6 +245,19 @@ async function press(h, channel, customId, options = {}) {
   const item = interaction(h.guild, { channel, customId, ...options });
   await h.handle(item);
   return item;
+}
+
+const staffAccess = { userId: STAFF, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] };
+
+async function choose(h, channel, customId, value, options = {}) {
+  const item = interaction(h.guild, { kind: 'select', channel, customId, values: [value], ...staffAccess, ...options });
+  await h.handle(item);
+  return item;
+}
+
+async function manageAction(h, channel, action, options = {}) {
+  const viewerId = options.userId ?? STAFF;
+  return choose(h, channel, `${IDS.manageMenu}${viewerId}`, action, options);
 }
 
 // Simule un ticket fermé avant la mise à jour, avec ses permissions d'origine.
@@ -791,11 +844,12 @@ test('les anciens panneaux sont mis à niveau sans nouvelles mentions, avec repr
   assert.equal(h.store.get(channel.id).panelVersion, undefined);
   panel.failEdit = false;
   await h.service.refreshOutdatedPanels(h.guild);
-  assert.ok(h.store.get(channel.id).panelVersion >= 2);
+  assert.ok(h.store.get(channel.id).panelVersion >= 4);
   assert.equal(channel.sent.length, messagesBefore);
   assert.deepEqual(panel.payload.allowedMentions, { parse: [] });
   const ids = panel.payload.components.flatMap((row) => row.toJSON().components.map((button) => button.custom_id));
-  assert.ok(ids.includes(IDS.waiting));
+  assert.ok(ids.includes(IDS.manage));
+  assert.ok(!ids.includes(IDS.waiting));
   const version = h.store.get(channel.id).panelVersion;
   await h.service.refreshOutdatedPanels(h.guild);
   assert.equal(h.store.get(channel.id).panelVersion, version);
@@ -1096,14 +1150,14 @@ test('la reprise d’un ticket déjà attribué est explicite, personnelle et v�
   const revoked = await press(h, channel, takeoverId, { userId: STRANGER });
   assert.match(revoked.response.content, /Seule l’équipe/);
   assert.equal(h.store.get(channel.id).assignedTo, STAFF);
-  const accepted = await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE] });
+  const accepted = await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
   assert.match(accepted.response.content, /Pris en charge/);
   assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
 
   const staleRequest = await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
   const staleId = staleRequest.response.components[0].toJSON().components[0].custom_id;
   await press(h, channel, IDS.waiting, { userId: STRANGER, roles: [ROLE] });
-  const stale = await press(h, channel, staleId, { userId: STAFF, roles: [ROLE] });
+  const stale = await press(h, channel, staleId, { userId: STAFF, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
   assert.match(stale.response.content, /responsable a changé/);
   assert.equal(h.store.get(channel.id).assignedTo, null);
   assert.equal(h.store.get(channel.id).status, 'waiting');
@@ -1133,7 +1187,7 @@ test('la priorité staff est persistante, idempotente et ne modifie pas l’anci
   assert.equal(h.store.get(channel.id).updatedAt, initialAge);
   const panel = channel.messageMap.get(ticket.panelMessageId).payload;
   assert.match(panel.embeds[0].toJSON().fields[3].value, /Urgente/);
-  assert.ok(panel.components.flatMap((row) => row.toJSON().components).some((button) => button.custom_id === IDS.normal));
+  assert.ok(panel.components.flatMap((row) => row.toJSON().components).some((button) => button.custom_id === IDS.manage));
   const before = channel.sent.length;
   const repeated = await press(h, channel, IDS.urgent, { userId: STAFF, roles: [ROLE] });
   assert.match(repeated.response.content, /Priorité inchangée/);
@@ -1158,7 +1212,7 @@ test('une ancienne confirmation de reprise est refusée même si le même respon
   await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
   assert.equal(h.store.get(channel.id).assignedTo, STAFF);
   assert.ok(h.store.get(channel.id).assignmentRevision > initialRevision);
-  const stale = await press(h, channel, staleId, { userId: STRANGER, roles: [ROLE] });
+  const stale = await press(h, channel, staleId, { userId: STRANGER, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
   assert.match(stale.response.content, /responsable a changé/);
   assert.equal(h.store.get(channel.id).assignedTo, STAFF);
 });
@@ -1207,7 +1261,7 @@ test('une ancienne attribution sans numéro de révision peut être reprise apr�
   const requested = await press(h, channel, IDS.claim, { userId: STRANGER, roles: [ROLE] });
   const takeoverId = requested.response.components[0].toJSON().components[0].custom_id;
   assert.ok(takeoverId.endsWith(':0'));
-  await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE] });
+  await press(h, channel, takeoverId, { userId: STRANGER, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
   assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
   assert.equal(h.store.get(channel.id).assignmentRevision, 1);
 });
@@ -1267,4 +1321,576 @@ test('la suppression confirmée ne dépend pas de restaurer une ancienne transit
   assert.equal(h.store.get(channel.id).status, 'deleted');
   assert.equal(h.store.get(channel.id).pendingTransition, null);
   assert.equal(h.guild.channelMap.has(channel.id), false);
+});
+
+test('Gérer le dossier rassemble les actions et reste réservé au staff qui voit le salon', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const owner = await press(h, channel, IDS.manage, { userId: OWNER, permissions: [PermissionFlagsBits.ViewChannel] });
+  assert.match(owner.response.content, /Seule l’équipe/);
+  const hiddenStaff = await press(h, channel, IDS.manage, { userId: STAFF, roles: [ROLE] });
+  assert.match(hiddenStaff.response.content, /voir ce salon/);
+  const staff = await press(h, channel, IDS.manage, staffAccess);
+  assert.equal(staff.response.flags, MessageFlags.Ephemeral);
+  const menu = staff.response.components[0].toJSON().components[0];
+  assert.equal(menu.custom_id, `${IDS.manageMenu}${STAFF}`);
+  assert.deepEqual(menu.options.map((option) => option.value), ['claim', 'progress', 'resolve', 'waiting', 'priority', 'category', 'note-add', 'note-list', 'role']);
+  const stranger = await choose(h, channel, menu.custom_id, 'note-list', { userId: STRANGER, roles: [ROLE] });
+  assert.match(stranger.response.content, /personnel/);
+  assert.ok(!stranger.response.embeds?.length);
+});
+
+test('les anciens boutons de suivi sont remplacés par des actions fonctionnelles dans le menu staff', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const claim = await manageAction(h, channel, 'claim');
+  assert.match(claim.response.content, /Pris en charge/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+  const step = await manageAction(h, channel, 'progress');
+  assert.match(step.modal.custom_id, new RegExp(`^${IDS.manageProgressSubmit}${STAFF}:plainte:0$`));
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: step.modal.custom_id, detail: 'Analyse du dossier', ...staffAccess });
+  await h.handle(modal);
+  assert.equal(h.store.get(channel.id).status, 'progress');
+  assert.equal(h.store.get(channel.id).progressDetail, 'Analyse du dossier');
+  const resolved = await manageAction(h, channel, 'resolve');
+  assert.match(resolved.response.content, /Traité/);
+  const waiting = await manageAction(h, channel, 'waiting');
+  assert.match(waiting.response.content, /En attente/);
+  assert.equal(h.store.get(channel.id).assignedTo, null);
+});
+
+test('la priorité se modifie depuis le dossier sans changer l’ancienneté ni créer de commandes', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const age = h.store.get(channel.id).updatedAt;
+  const submenu = await manageAction(h, channel, 'priority');
+  assert.equal(submenu.response.components[0].toJSON().components[0].custom_id, `${IDS.managePriority}${STAFF}`);
+  const urgent = await choose(h, channel, `${IDS.managePriority}${STAFF}`, 'urgent');
+  assert.match(urgent.response.content, /Priorité mise à jour.*urgente/);
+  assert.equal(h.store.get(channel.id).urgent, true);
+  assert.equal(h.store.get(channel.id).updatedAt, age);
+  const normal = await choose(h, channel, `${IDS.managePriority}${STAFF}`, 'normal');
+  assert.match(normal.response.content, /Priorité mise à jour.*normale/);
+  assert.equal(h.store.get(channel.id).urgent, false);
+  assert.equal(h.store.get(channel.id).updatedAt, age);
+});
+
+test('les notes internes restent privées, paginées et effacées lors de la suppression', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const countBefore = channel.sent.length;
+  const age = h.store.get(channel.id).updatedAt;
+  const noteButton = await manageAction(h, channel, 'note-add');
+  assert.equal(noteButton.modal.custom_id, `${IDS.manageNoteSubmit}${STAFF}:plainte:0`);
+  for (const detail of ['Enquête privée A', 'Enquête privée B', 'Enquête privée C']) {
+    const submitted = interaction(h.guild, { kind: 'modal', channel, customId: noteButton.modal.custom_id, detail, ...staffAccess });
+    await h.handle(submitted);
+    assert.match(submitted.response.content, /Note interne enregistrée/);
+    assert.equal(submitted.deferOptions.flags, MessageFlags.Ephemeral);
+  }
+  assert.equal(channel.sent.length, countBefore, 'Aucune note ne doit être envoyée dans le salon visible par le membre.');
+  assert.ok(!JSON.stringify(channel.sent).includes('Enquête privée'));
+  assert.equal(h.store.get(channel.id).updatedAt, age);
+  assert.equal(new TicketStore(h.config.dataFile, GUILD).get(channel.id).internalNotes.length, 3);
+  const first = await manageAction(h, channel, 'note-list');
+  const embed = first.response.embeds[0].toJSON();
+  assert.match(embed.description, /Enquête privée C/);
+  assert.match(embed.description, /Enquête privée B/);
+  assert.doesNotMatch(embed.description, /Enquête privée A/);
+  assert.match(embed.footer.text, /Page 1\/2/);
+  const nextId = first.response.components[0].toJSON().components[1].custom_id;
+  const next = await press(h, channel, nextId, staffAccess);
+  assert.match(next.response.embeds[0].toJSON().description, /Enquête privée A/);
+  const owner = await choose(h, channel, `${IDS.manageMenu}${OWNER}`, 'note-list', { userId: OWNER, roles: [] });
+  assert.match(owner.response.content, /Seule l’équipe/);
+  assert.ok(!JSON.stringify(owner.response).includes('Enquête privée'));
+  const forged = interaction(h.guild, { kind: 'modal', channel, customId: noteButton.modal.custom_id, detail: 'intrus', userId: STRANGER, roles: [ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
+  await h.handle(forged);
+  assert.match(forged.response.content, /personnel/);
+  assert.equal(h.store.get(channel.id).internalNotes.length, 3);
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Enquête privée'));
+});
+
+test('le message au rôle est public, n’ouvre pas le salon et ne notifie que le rôle choisi', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const submenu = await manageAction(h, channel, 'role');
+  assert.match(submenu.response.content, /publié dans ce ticket.*visible par son créateur/);
+  assert.match(submenu.response.content, /ne lui donne pas accès/);
+  const selector = interaction(h.guild, { kind: 'role-select', channel, customId: `${IDS.manageRoleSelect}${STAFF}`, values: [NEW_ROLE], ...staffAccess });
+  await h.handle(selector);
+  assert.equal(selector.modal.custom_id, `${IDS.manageRoleSubmit}${STAFF}:plainte:0:${NEW_ROLE}`);
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: selector.modal.custom_id, detail: `Besoin d’aide @everyone <@${OWNER}> <@&${SPECIAL_ROLE}>`, ...staffAccess });
+  const before = channel.sent.length;
+  await h.handle(modal);
+  assert.match(modal.response.content, /Message publié/);
+  assert.equal(channel.sent.length, before + 1);
+  const message = channel.sent.at(-1).payload;
+  assert.match(message.content, new RegExp(`<@&${NEW_ROLE}>`));
+  assert.match(message.content, /Besoin d’aide/);
+  assert.deepEqual(message.allowedMentions, { parse: [], roles: [NEW_ROLE] });
+  assert.equal(channel.permissionOverwrites.cache.has(NEW_ROLE), false);
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  const everyone = interaction(h.guild, { kind: 'role-select', channel, customId: `${IDS.manageRoleSelect}${STAFF}`, values: [GUILD], ...staffAccess });
+  await h.handle(everyone);
+  assert.match(everyone.response.content, /autre que @everyone/);
+});
+
+test('un rôle non mentionnable est refusé sauf si le bot peut mentionner les rôles', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  h.guild.roleMap.get(NEW_ROLE).mentionable = false;
+  const id = `${IDS.manageRoleSubmit}${STAFF}:plainte:0:${NEW_ROLE}`;
+  const denied = interaction(h.guild, { kind: 'modal', channel, customId: id, detail: 'Pouvez-vous aider ?', ...staffAccess });
+  const count = channel.sent.length;
+  await h.handle(denied);
+  assert.match(denied.response.content, /rôle n’est pas mentionnable/);
+  assert.equal(channel.sent.length, count);
+  channel.botPermissions = [PermissionFlagsBits.MentionEveryone];
+  const allowed = interaction(h.guild, { kind: 'modal', channel, customId: id, detail: 'Pouvez-vous aider ?', ...staffAccess });
+  await h.handle(allowed);
+  assert.match(allowed.response.content, /Message publié/);
+  assert.equal(channel.sent.length, count + 1);
+  const absent = interaction(h.guild, { kind: 'modal', channel, customId: `${IDS.manageRoleSubmit}${STAFF}:plainte:0:200000000000000099`, detail: 'test', ...staffAccess });
+  await h.handle(absent);
+  assert.match(absent.response.content, /rôle est introuvable/);
+});
+
+test('changer le type déplace le salon, applique les nouveaux rôles et remet le dossier en attente', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h);
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await press(h, channel, IDS.urgent, { userId: STAFF, roles: [ROLE] });
+  await waitForName(h.store, channel);
+  await channel.permissionOverwrites.edit(NEW_ROLE, { ViewChannel: true }); // accès manuel distinct
+  channel.permissionEvents.length = 0;
+  const submenu = await manageAction(h, channel, 'category');
+  assert.equal(submenu.response.components[0].toJSON().components[0].custom_id, `${IDS.manageCategory}${STAFF}`);
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
+  assert.match(selected.response.content, /responsable libéré.*remis en attente/);
+  assert.match(selected.response.content, /accès ajoutés manuellement restent/);
+  const confirmId = selected.response.components[0].toJSON().components[0].custom_id;
+  const done = await press(h, channel, confirmId, staffAccess);
+  assert.match(done.response.content, /Catégorie changée : RC STAFF/);
+  assert.match(done.response.content, /gestion est désormais réservée/);
+  const ticket = h.store.get(channel.id);
+  assert.equal(ticket.type, 'rc_staff');
+  assert.equal(ticket.categoryRevision, 1);
+  assert.equal(ticket.status, 'waiting');
+  assert.equal(ticket.assignedTo, null);
+  assert.equal(ticket.urgent, true);
+  assert.equal(channel.parentId, CATEGORIES.rc_staff);
+  assert.equal(channel.channelEditOptions.lockPermissions, false);
+  assert.match(channel.topic, /RC STAFF/);
+  assert.equal(channel.permissionOverwrites.cache.has(ROLE), false);
+  assert.equal(permission(channel, SPECIAL_ROLE, 'ViewChannel'), true);
+  assert.equal(permission(channel, NEW_ROLE, 'ViewChannel'), true);
+  assert.ok(channel.permissionEvents.indexOf(`delete:${ROLE}`) < channel.permissionEvents.indexOf(`edit:${SPECIAL_ROLE}`));
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(h.store.findOpen(OWNER, 'rc_staff').channelId, channel.id);
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🔴-attente-rc-staff-/u);
+  const oldStaff = await press(h, channel, IDS.manage, staffAccess);
+  assert.match(oldStaff.response.content, /Seule l’équipe/);
+  const newStaff = await press(h, channel, IDS.manage, { userId: STAFF, roles: [SPECIAL_ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
+  assert.equal(newStaff.response.flags, MessageFlags.Ephemeral);
+  const replacement = await openTicket(h, 'plainte');
+  assert.ok(replacement.ticket);
+  assert.notEqual(replacement.channel.id, channel.id);
+});
+
+test('une catégorie déjà occupée ou non autorisée ne modifie ni salon ni droits', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const source = await openTicket(h);
+  const destination = await openTicket(h, 'rc_staff');
+  const selected = await choose(h, source.channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
+  const confirmId = selected.response.components[0].toJSON().components[0].custom_id;
+  const denied = await press(h, source.channel, confirmId, { userId: OWNER, permissions: [PermissionFlagsBits.ViewChannel] });
+  assert.match(denied.response.content, /personnel/);
+  const duplicate = await press(h, source.channel, confirmId, staffAccess);
+  assert.match(duplicate.response.content, /déjà un ticket ouvert/);
+  assert.equal(h.store.get(source.channel.id).type, 'plainte');
+  assert.equal(h.store.get(source.channel.id).pendingReclassification, null);
+  assert.equal(source.channel.parentId, CATEGORIES.plainte);
+  assert.equal(permission(source.channel, ROLE, 'ViewChannel'), true);
+  assert.equal(source.channel.permissionOverwrites.cache.has(SPECIAL_ROLE), false);
+  assert.equal(h.store.findOpen(OWNER, 'rc_staff').channelId, destination.channel.id);
+});
+
+test('un formulaire de note et une confirmation de catégorie périmés ne s’appliquent pas au nouveau dossier', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const note = await manageAction(h, channel, 'note-add');
+  const selection = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  const staleConfirm = selection.response.components[0].toJSON().components[0].custom_id;
+  await press(h, channel, staleConfirm, staffAccess);
+  assert.equal(h.store.get(channel.id).type, 'question');
+  const oldNote = interaction(h.guild, { kind: 'modal', channel, customId: note.modal.custom_id, detail: 'Ne pas enregistrer', ...staffAccess });
+  await h.handle(oldNote);
+  assert.match(oldNote.response.content, /catégorie du ticket a changé/);
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  const back = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'plainte');
+  await press(h, channel, back.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.equal(h.store.get(channel.id).type, 'plainte');
+  assert.equal(h.store.get(channel.id).categoryRevision, 2);
+  const stale = await press(h, channel, staleConfirm, staffAccess);
+  assert.match(stale.response.content, /catégorie du ticket a changé/);
+  assert.equal(h.store.get(channel.id).type, 'plainte');
+});
+
+test('un déplacement et l’ouverture simultanée du nouveau type ne créent pas de doublon', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  const confirmId = selected.response.components[0].toJSON().components[0].custom_id;
+  let release;
+  let started;
+  channel.editGate = new Promise((resolve) => { release = resolve; });
+  const moving = new Promise((resolve) => { started = resolve; });
+  channel.onEditStart = started;
+  t.after(() => release());
+  const change = press(h, channel, confirmId, staffAccess);
+  await moving;
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  assert.equal(h.store.findOpen(OWNER, 'question').channelId, channel.id);
+  const open = openTicket(h, 'question');
+  await Promise.resolve();
+  assert.equal(h.guild.createCount, 1);
+  release();
+  const [, result] = await Promise.all([change, open]);
+  assert.match(result.item.response.content, /déjà un ticket ouvert/);
+  assert.equal(result.ticket.channelId, channel.id);
+  assert.equal(h.guild.createCount, 1);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(h.store.findOpen(OWNER, 'question').channelId, channel.id);
+});
+
+test('une reclassification interrompue réserve les deux types et reprend avec les rôles configurés au redémarrage', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note privée conservée');
+  channel.failChannelEdit = new Error('déplacement indisponible');
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
+  const failed = await press(h, channel, selected.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.match(failed.response.content, /interrompu.*accès ont pu changer/);
+  assert.equal(h.store.get(channel.id).type, 'plainte');
+  assert.equal(h.store.get(channel.id).pendingReclassification.targetType, 'rc_staff');
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  assert.equal(h.store.findOpen(OWNER, 'rc_staff').channelId, channel.id);
+  assert.equal(channel.permissionOverwrites.cache.has(ROLE), false);
+  assert.equal(permission(channel, SPECIAL_ROLE, 'ViewChannel'), true);
+  const blocked = await openTicket(h, 'rc_staff');
+  assert.match(blocked.item.response.content, /changement de catégorie.*en cours/);
+  assert.equal(h.guild.createCount, 1);
+  h.service.stop();
+  channel.failChannelEdit = null;
+  const config = loadConfig({ ...h.rawConfig, rolesStaffParCategorie: { rc_staff: [NEW_ROLE] } }, path.dirname(path.dirname(h.config.dataFile)));
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingReclassifications(h.guild);
+  const ticket = reloaded.get(channel.id);
+  assert.equal(ticket.type, 'rc_staff');
+  assert.equal(ticket.pendingReclassification, null);
+  assert.equal(ticket.internalNotes[0].text, 'Note privée conservée');
+  assert.equal(channel.parentId, CATEGORIES.rc_staff);
+  assert.equal(channel.permissionOverwrites.cache.has(SPECIAL_ROLE), false);
+  assert.equal(permission(channel, NEW_ROLE, 'ViewChannel'), true);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
+  assert.equal(reloaded.findOpen(OWNER, 'rc_staff').channelId, channel.id);
+  assert.ok(!JSON.stringify(channel.sent).includes('Note privée conservée'));
+});
+
+test('une erreur disque après déplacement est réparée au redémarrage sans perdre les réservations', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h);
+  const save = h.store.save.bind(h.store);
+  h.store.save = (ticket) => {
+    if (ticket.type === 'rc_staff' && !ticket.pendingReclassification) throw new Error('disque indisponible');
+    return save(ticket);
+  };
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
+  const failed = await press(h, channel, selected.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.match(failed.response.content, /interrompu/);
+  assert.equal(channel.parentId, CATEGORIES.rc_staff);
+  assert.equal(h.store.get(channel.id).type, 'plainte');
+  assert.ok(h.store.get(channel.id).pendingReclassification);
+  assert.equal(h.store.findOpen(OWNER, 'rc_staff').channelId, channel.id);
+  h.service.stop();
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => service.stop());
+  await service.recoverPendingReclassifications(h.guild);
+  assert.equal(reloaded.get(channel.id).type, 'rc_staff');
+  assert.equal(reloaded.get(channel.id).pendingReclassification, null);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
+  assert.equal(reloaded.findOpen(OWNER, 'rc_staff').channelId, channel.id);
+});
+
+test('le créateur peut fermer un ticket dont la reclassification a échoué, en libérant les deux emplacements', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note à effacer');
+  channel.failChannelEdit = new Error('déplacement impossible');
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  await press(h, channel, selected.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.ok(h.store.get(channel.id).pendingReclassification);
+  await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id).pendingReclassification, null);
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(h.store.findOpen(OWNER, 'question'), null);
+});
+
+test('les notes et les mentions revérifient les rôles et ViewChannel au moment de l’action', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Secret du dossier');
+  const revoked = await manageAction(h, channel, 'note-list', { freshRoles: [] });
+  assert.match(revoked.response.content, /droits ont changé/);
+  assert.deepEqual(revoked.response.embeds, []);
+  assert.deepEqual(revoked.response.components, []);
+  assert.ok(!JSON.stringify(revoked.response).includes('Secret du dossier'));
+  const noView = await manageAction(h, channel, 'note-list', { freshPermissions: [] });
+  assert.match(noView.response.content, /droits ont changé/);
+  assert.ok(!JSON.stringify(noView.response).includes('Secret du dossier'));
+  const before = channel.sent.length;
+  const modal = interaction(h.guild, {
+    kind: 'modal', channel, customId: `${IDS.manageRoleSubmit}${STAFF}:plainte:0:${NEW_ROLE}`,
+    detail: 'demande', ...staffAccess, freshRoles: [],
+  });
+  await h.handle(modal);
+  assert.match(modal.response.content, /droits ont changé/);
+  assert.equal(channel.sent.length, before);
+});
+
+test('une consultation de notes en attente ne révèle rien après retrait du rôle staff', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note strictement privée');
+  let release;
+  let started;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const running = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  const lock = h.service.locks.run(OWNER, async () => { started(); await gate; });
+  await running;
+  const request = interaction(h.guild, { kind: 'select', channel, customId: `${IDS.manageMenu}${STAFF}`, values: ['note-list'], ...staffAccess });
+  request.response = { embeds: [{ stale: 'ancien contenu' }], components: [{ stale: true }] };
+  const pending = h.handle(request);
+  await Promise.resolve();
+  h.guild.memberMap.get(STAFF).roles.cache.clear();
+  release();
+  await Promise.all([lock, pending]);
+  assert.match(request.response.content, /droits ont changé/);
+  assert.deepEqual(request.response.embeds, []);
+  assert.deepEqual(request.response.components, []);
+  assert.ok(!JSON.stringify(request.response).includes('Note strictement privée'));
+});
+
+test('les notes internes sont effacées aussi quand le salon est supprimé manuellement', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Secret à détruire');
+  await h.service.channelDeleted(channel);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Secret à détruire'));
+});
+
+test('une catégorie pleine est signalée et le journal protège les deux types', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  channel.failChannelEdit = Object.assign(new Error('catégorie pleine'), {
+    code: 50035, rawError: { errors: { parent_id: { _errors: [{ code: 'CHANNEL_PARENT_MAX_CHANNELS' }] } } },
+  });
+  const chosen = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  const failed = await press(h, channel, chosen.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.match(failed.response.content, /catégorie Discord est pleine/);
+  assert.ok(h.store.get(channel.id).pendingReclassification);
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  assert.equal(h.store.findOpen(OWNER, 'question').channelId, channel.id);
+  assert.equal(channel.parentId, CATEGORIES.plainte);
+});
+
+test('si le salon disparaît pendant le changement de catégorie, le registre libère les deux types et les notes', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Ne pas conserver');
+  channel.edit = async () => { h.guild.channelMap.delete(channel.id); throw apiError(10003); };
+  const chosen = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  const failed = await press(h, channel, chosen.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.match(failed.response.content, /salon.*n’existe plus/);
+  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
+  assert.equal(h.store.findOpen(OWNER, 'question'), null);
+});
+
+test('le contenu des notes internes est borné et une note vide n’est jamais sauvegardée', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await assert.rejects(h.service.addInternalNote(h.guild, channel.id, STAFF, '  \n '), /doit contenir/);
+  await assert.rejects(h.service.addInternalNote(h.guild, channel.id, STAFF, 'x'.repeat(801)), /800 caractères/);
+  const notes = Array.from({ length: 100 }, () => ({ authorId: STAFF, createdAt: '2026-01-01T00:00:00.000Z', text: 'note' }));
+  h.store.save({ ...h.store.get(channel.id), internalNotes: notes });
+  await assert.rejects(h.service.addInternalNote(h.guild, channel.id, STAFF, 'une de trop'), /déjà 100 notes/);
+  assert.equal(h.store.get(channel.id).internalNotes.length, 100);
+  assert.ok(!JSON.stringify(channel.sent).includes('une de trop'));
+});
+
+test('le changement de catégorie et la mention sont refusés si le rôle du staff a été retiré entre-temps', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  const confirm = selected.response.components[0].toJSON().components[0].custom_id;
+  const denied = await press(h, channel, confirm, { ...staffAccess, freshRoles: [] });
+  assert.match(denied.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).type, 'plainte');
+  assert.equal(h.store.get(channel.id).pendingReclassification, null);
+  assert.equal(channel.parentId, CATEGORIES.plainte);
+  const count = channel.sent.length;
+  const modal = interaction(h.guild, { kind: 'modal', channel, customId: `${IDS.manageRoleSubmit}${STAFF}:plainte:0:${NEW_ROLE}`, detail: 'test', ...staffAccess, freshPermissions: [] });
+  await h.handle(modal);
+  assert.match(modal.response.content, /droits ont changé/);
+  assert.equal(channel.sent.length, count);
+});
+
+test('après changement de catégorie, les notes internes suivent les nouveaux droits staff', async (t) => {
+  const h = harness(t, { rolesStaffParCategorie: { rc_staff: [SPECIAL_ROLE] } });
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Information réservée');
+  const chosen = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
+  await press(h, channel, chosen.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  const former = await manageAction(h, channel, 'note-list', staffAccess);
+  assert.match(former.response.content, /Seule l’équipe/);
+  assert.ok(!JSON.stringify(former.response).includes('Information réservée'));
+  const current = await manageAction(h, channel, 'note-list', { userId: STAFF, roles: [SPECIAL_ROLE], permissions: [PermissionFlagsBits.ViewChannel] });
+  assert.match(current.response.embeds[0].toJSON().description, /Information réservée/);
+  assert.deepEqual(current.response.allowedMentions, { parse: [] });
+});
+
+test('un ancien renommage en vol ne peut pas écraser le nom de la nouvelle catégorie', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  let release;
+  let started;
+  channel.renameGate = new Promise((resolve) => { release = resolve; });
+  const inFlight = new Promise((resolve) => { started = resolve; });
+  channel.onRenameStart = started;
+  t.after(() => release());
+  await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
+  await inFlight;
+  const chosen = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
+  await press(h, channel, chosen.response.components[0].toJSON().components[0].custom_id, staffAccess);
+  assert.equal(h.store.get(channel.id).type, 'question');
+  release();
+  await waitForName(h.store, channel);
+  assert.match(channel.name, /^🔴-attente-question-/u);
+  assert.equal(channel.renameAttempts.length, 2);
+});
+
+test('une mention d’un rôle disparu ou un message trop long ne publie rien', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const count = channel.sent.length;
+  h.guild.roles.fetch = async (id) => {
+    if (!id) return h.guild.roleMap;
+    throw apiError(10011);
+  };
+  const id = `${IDS.manageRoleSubmit}${STAFF}:plainte:0:${NEW_ROLE}`;
+  const missing = interaction(h.guild, { kind: 'modal', channel, customId: id, detail: 'besoin d’aide', ...staffAccess });
+  await h.handle(missing);
+  assert.match(missing.response.content, /rôle est introuvable/);
+  const long = interaction(h.guild, { kind: 'modal', channel, customId: id, detail: 'a'.repeat(601), ...staffAccess });
+  await h.handle(long);
+  assert.match(long.response.content, /600 caractères/);
+  assert.equal(channel.sent.length, count);
+});
+
+test('un administrateur qui voit le salon peut consulter les notes sans rôle staff', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note pour le staff');
+  const result = await manageAction(h, channel, 'note-list', {
+    userId: STRANGER, roles: [], permissions: [PermissionFlagsBits.Administrator],
+  });
+  assert.match(result.response.embeds[0].toJSON().description, /Note pour le staff/);
+});
+
+test('les actions du menu ne modifient pas le statut ou la priorité après retrait des droits', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  const claim = await manageAction(h, channel, 'claim', { freshRoles: [] });
+  assert.match(claim.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  const priority = await choose(h, channel, `${IDS.managePriority}${STAFF}`, 'urgent', { ...staffAccess, freshPermissions: [] });
+  assert.match(priority.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).urgent, false);
+  const progress = interaction(h.guild, { kind: 'modal', channel, customId: `${IDS.manageProgressSubmit}${STAFF}:plainte:0`, detail: 'enquête', ...staffAccess, freshRoles: [] });
+  await h.handle(progress);
+  assert.match(progress.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+});
+
+test('la confirmation de reprise depuis le dossier vérifie à nouveau les droits réels', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await press(h, channel, IDS.claim, { userId: STRANGER, roles: [ROLE] });
+  const request = await manageAction(h, channel, 'claim');
+  const confirm = request.response.components[0].toJSON().components[0].custom_id;
+  const denied = await press(h, channel, confirm, { ...staffAccess, freshRoles: [] });
+  assert.match(denied.response.content, /droits ont changé/);
+  assert.equal(h.store.get(channel.id).assignedTo, STRANGER);
+  const accepted = await press(h, channel, confirm, staffAccess);
+  assert.match(accepted.response.content, /Pris en charge/);
+  assert.equal(h.store.get(channel.id).assignedTo, STAFF);
+});
+
+test('au redémarrage, un salon supprimé hors ligne libère le type et efface les notes', async (t) => {
+  const h = harness(t);
+  const missing = await openTicket(h);
+  const present = await openTicket(h, 'question');
+  await h.service.addInternalNote(h.guild, missing.channel.id, STAFF, 'Secret à purger après redémarrage');
+  await h.service.addInternalNote(h.guild, present.channel.id, STAFF, 'Note du salon présent');
+  h.service.stop();
+  h.guild.channelMap.delete(missing.channel.id); // Aucun événement ChannelDelete pendant l'arrêt.
+  const reloaded = new TicketStore(h.config.dataFile, GUILD);
+  const restarted = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
+  t.after(() => restarted.stop());
+  const fetch = h.guild.channels.fetch;
+  let listOptions;
+  h.guild.channels.fetch = async (id, options) => {
+    if (!id) listOptions = options;
+    return fetch(id, options);
+  };
+  await restarted.reconcileMissingChannels(h.guild);
+  assert.deepEqual(listOptions, { cache: false });
+  assert.equal(reloaded.get(missing.channel.id).status, 'deleted');
+  assert.deepEqual(reloaded.get(missing.channel.id).internalNotes, []);
+  assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
+  assert.equal(reloaded.get(present.channel.id).internalNotes[0].text, 'Note du salon présent');
+  assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Secret à purger après redémarrage'));
+});
+
+test('une liste incomplète ou une perte d’accès Discord ne supprime jamais les notes', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h);
+  await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Note à conserver');
+  const fetch = h.guild.channels.fetch;
+  h.guild.channels.fetch = async (id, options) => {
+    if (!id) return new Map(); // Salon omis de la liste, mais pas forcément supprimé.
+    if (id === channel.id) throw apiError(50001); // Accès manquant, pas Unknown Channel.
+    return fetch(id, options);
+  };
+  await h.service.reconcileMissingChannels(h.guild);
+  assert.equal(h.store.get(channel.id).status, 'waiting');
+  assert.equal(h.store.get(channel.id).internalNotes[0].text, 'Note à conserver');
+  assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, channel.id);
+  h.guild.channels.fetch = async () => { throw new Error('Discord indisponible'); };
+  await h.service.reconcileMissingChannels(h.guild);
+  assert.equal(h.store.get(channel.id).internalNotes[0].text, 'Note à conserver');
 });
