@@ -52,7 +52,9 @@ async function main() {
       console.log(`Bot connecté en tant que ${readyClient.user.tag}. Serveur autorisé : ${config.guildId}.`);
       console.log('Utilisez /panneau-tickets dans le salon où publier le menu.');
     } catch (error) {
-      console.error('Initialisation impossible :', error.message);
+      // Certains objets d’erreur Discord/Node n’ont pas de `message` exploitable.
+      // Journaliser l’objet complet conserve le code, la pile et les détails API.
+      console.error('Initialisation impossible :', error);
       process.exitCode = 1;
       inactivityMonitor?.stop();
       service?.stop();
@@ -78,6 +80,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('Démarrage impossible :', error.message);
+  console.error('Démarrage impossible :', error);
   process.exitCode = 1;
 });
