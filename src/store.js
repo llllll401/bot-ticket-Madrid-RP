@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { slugify, STATUSES, TYPE_BY_KEY } from './catalog.js';
 import { MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH } from './dossier.js';
-import { INACTIVITY_DELAY_MS } from './inactivity.js';
+import { INACTIVITY_WARNING_DELAY_MS } from './inactivity.js';
 import { OWNER_WRITE_PERMISSIONS } from './permissions.js';
 
 const SNOWFLAKE = /^\d{17,20}$/;
@@ -45,10 +45,10 @@ function validTicket(ticket, channelId, guildId) {
       || !isDate(ticket.inactivityReminder.activityAt)
       || !['sending', 'sent'].includes(ticket.inactivityReminder.state)
       || (ticket.inactivityReminder.state === 'sending' && (!isDate(ticket.inactivityReminder.attemptedAt)
-        || Date.parse(ticket.inactivityReminder.attemptedAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_DELAY_MS
+        || Date.parse(ticket.inactivityReminder.attemptedAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_WARNING_DELAY_MS
         || !/^[a-f0-9]{24}$/.test(ticket.inactivityReminder.nonce ?? '')))
       || (ticket.inactivityReminder.state === 'sent' && (!isDate(ticket.inactivityReminder.sentAt)
-        || Date.parse(ticket.inactivityReminder.sentAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_DELAY_MS
+        || Date.parse(ticket.inactivityReminder.sentAt) < Date.parse(ticket.inactivityReminder.activityAt) + INACTIVITY_WARNING_DELAY_MS
         || !isId(ticket.inactivityReminder.messageId)))
       || Date.parse(ticket.inactivityReminder.activityAt) !== Date.parse(ticket.lastActivityAt ?? ticket.createdAt)))
     || (ticket.internalNotes != null && (!Array.isArray(ticket.internalNotes)

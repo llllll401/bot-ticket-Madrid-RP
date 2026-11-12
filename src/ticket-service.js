@@ -534,7 +534,7 @@ export class TicketService {
     // déclencher la suppression tant qu'un rappel n'est pas confirmé.
     ticket = this.store.save({ ...ticket, inactivityReminder: pending });
     const message = await channel.send({
-      content: `⏰ <@${ticket.ownerId}>, ce ticket est inactif depuis 24 h. Répondez dans ce salon principal (pas dans un fil). Sans nouveau message d’un membre dans les 24 h, le salon et tous ses messages seront définitivement supprimés, sans transcription.`,
+      content: `⏰ <@${ticket.ownerId}>, ce ticket est inactif depuis 2 h. Répondez dans ce salon principal (pas dans un fil). Sans nouveau message d’un membre dans l’heure, le salon et tous ses messages seront définitivement supprimés, sans transcription.`,
       allowedMentions: { parse: [], users: [ticket.ownerId] },
       nonce: pending.nonce, enforceNonce: true,
     });
@@ -542,7 +542,7 @@ export class TicketService {
     if (!ticket.inactivityReminder || ticket.inactivityReminder.nonce !== pending.nonce) return { activity: true };
     if (!/^\d{17,20}$/.test(message?.id ?? '')) throw new Error('Impossible de confirmer l’envoi du rappel Discord.');
     // Même après une réponse réseau retardée ou un renvoi dédupliqué, laisser
-    // au moins 24 h complètes après la confirmation de l'envoi.
+    // une heure complète après la confirmation de l'envoi.
     const sentAt = new Date(Math.max(this.clock(), Number(message.createdTimestamp) || 0)).toISOString();
     this.store.save({
       ...ticket, inactivityReminder: { state: 'sent', activityAt, sentAt, messageId: message.id },
@@ -597,8 +597,8 @@ export class TicketService {
           await this.#deleteConfirmed(guild, ticket, channel, this.botUserId, { automatic: true });
           return { deleted: true };
         }
-        // Une réponse plus ancienne que 24 h annule l'ancien rappel. En envoyer
-        // un nouveau au lieu de supprimer immédiatement le salon.
+        // Une réponse antérieure au dernier contrôle annule l'ancien rappel. En
+        // envoyer un nouveau au lieu de supprimer immédiatement le salon.
       }
       await this.#ensureInactivityPermissions(guild, channel);
       ticket = this.#flushPendingActivity(ticket);

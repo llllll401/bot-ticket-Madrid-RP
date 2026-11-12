@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ChannelType, MessagePayload, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
-import { INACTIVITY_DELAY_MS as DAY, INACTIVITY_RETRY_MS, InactivityMonitor, inactivityDueAt, latestHumanMessageSince } from '../src/inactivity.js';
+import { INACTIVITY_WARNING_DELAY_MS as WARNING_DELAY, INACTIVITY_DELETION_DELAY_MS as DELETE_DELAY, INACTIVITY_RETRY_MS, InactivityMonitor, inactivityDueAt, latestHumanMessageSince } from '../src/inactivity.js';
 import { loadConfig } from '../src/config.js';
 import { TicketStore } from '../src/store.js';
 import { TicketService } from '../src/ticket-service.js';
@@ -139,9 +139,9 @@ async function record(h, timestamp, options = {}) {
   return message;
 }
 
-test('24 h d’inactivité envoient un rappel, puis 24 h sans message suppriment le salon', async (t) => {
+test('2 h d’inactivité envoient un rappel, puis 1 h sans message supprime le salon', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY - 1;
+  h.clock.now = BASE + WARNING_DELAY - 1;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 0);
   h.clock.now++;
@@ -149,7 +149,7 @@ test('24 h d’inactivité envoient un rappel, puis 24 h sans message suppriment
   assert.equal(h.channel.sent.length, 1);
   const payload = h.channel.sent[0].payload;
   assert.match(payload.content, new RegExp(`<@${OWNER}>`));
-  assert.match(payload.content, /24 h.*supprimés.*sans transcription/);
+  assert.match(payload.content, /2 h.*dans l’heure.*supprimés.*sans transcription/);
   assert.deepEqual(payload.allowedMentions, { parse: [], users: [OWNER] });
   assert.equal(payload.enforceNonce, true);
   assert.match(payload.nonce, /^[a-f0-9]{24}$/);
@@ -158,7 +158,7 @@ test('24 h d’inactivité envoient un rappel, puis 24 h sans message suppriment
   assert.deepEqual(body.allowed_mentions, { parse: [], users: [OWNER] });
   assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sent');
   assert.equal(new TicketStore(h.config.dataFile, GUILD).get(CHANNEL).inactivityReminder.state, 'sent');
-  h.clock.now = BASE + 2 * DAY - 1;
+  h.clock.now = BASE + WARNING_DELAY + DELETE_DELAY - 1;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   h.clock.now++;
@@ -174,26 +174,26 @@ test('24 h d’inactivité envoient un rappel, puis 24 h sans message suppriment
 
 test('tout message humain du salon remet le délai à zéro, mais pas les bots ni les webhooks', async (t) => {
   const h = harness(t);
-  const first = BASE + 23 * 60 * 60 * 1000;
+  const first = BASE + WARNING_DELAY - 60 * 60 * 1000;
   await record(h, first, { authorId: STAFF });
   assert.equal(h.store.get(CHANNEL).lastActivityAt, iso(first));
   await record(h, first + 1000, { bot: true, authorId: BOT });
   await record(h, first + 2000, { webhookId: '900000000000000001' });
   assert.equal(h.store.get(CHANNEL).lastActivityAt, iso(first));
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 0);
-  h.clock.now = first + DAY;
+  h.clock.now = first + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 1);
   const reply = h.clock.now + 2 * 60 * 60 * 1000;
   await record(h, reply);
   assert.equal(h.store.get(CHANNEL).inactivityReminder, null);
-  h.clock.now += DAY;
+  h.clock.now += WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   assert.equal(h.channel.sent.length, 1);
-  h.clock.now = reply + DAY;
+  h.clock.now = reply + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 2);
   assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sent');
@@ -202,50 +202,50 @@ test('tout message humain du salon remet le délai à zéro, mais pas les bots n
 test('les messages reçus hors ligne sont vérifiés avant rappel et avant suppression', async (t) => {
   const h = harness(t, { legacy: true });
   h.service.stop();
-  const first = BASE + 23 * 60 * 60 * 1000;
+  const first = BASE + WARNING_DELAY - 60 * 60 * 1000;
   h.channel.addMessage(first, { authorId: STAFF });
   const reloaded = new TicketStore(h.config.dataFile, GUILD);
   const service = h.makeService(reloaded);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 0);
   assert.equal(reloaded.get(CHANNEL).lastActivityAt, iso(first));
-  h.clock.now = first + DAY;
+  h.clock.now = first + WARNING_DELAY;
   await service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 1);
   service.stop();
-  const reply = h.clock.now + 3 * 60 * 60 * 1000;
+  const reply = h.clock.now + 30 * 60 * 1000;
   h.channel.addMessage(reply);
   const afterRestart = new TicketStore(h.config.dataFile, GUILD);
   const restarted = h.makeService(afterRestart);
-  h.clock.now = first + 2 * DAY;
+  h.clock.now = first + WARNING_DELAY + DELETE_DELAY;
   await restarted.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   assert.equal(afterRestart.get(CHANNEL).inactivityReminder, null);
   assert.equal(afterRestart.get(CHANNEL).lastActivityAt, iso(reply));
-  h.clock.now = reply + DAY;
+  h.clock.now = reply + WARNING_DELAY;
   await restarted.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 2);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   await restarted.checkInactivity(h.guild, CHANNEL);
   assert.equal(afterRestart.get(CHANNEL).status, 'deleted');
 });
 
 test('un arrêt prolongé avant le premier rappel ne ferme jamais le salon sans avertissement', async (t) => {
   const h = harness(t, { legacy: true });
-  h.clock.now = BASE + 10 * DAY;
+  h.clock.now = BASE + 10 * WARNING_DELAY;
   const result = await h.service.checkInactivity(h.guild, CHANNEL);
   assert.deepEqual(result, { reminded: true });
   assert.equal(h.channel.deleted, undefined);
   assert.equal(h.store.get(CHANNEL).inactivityReminder.sentAt, iso(h.clock.now));
-  h.clock.now += DAY - 1;
+  h.clock.now += DELETE_DELAY - 1;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
 });
 
 test('permissions ou historique indisponibles bloquent rappel et suppression', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   h.channel.bits = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels];
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /Permissions insuffisantes/);
   assert.equal(h.channel.sent.length, 0);
@@ -255,7 +255,7 @@ test('permissions ou historique indisponibles bloquent rappel et suppression', a
   assert.equal(h.channel.sent.length, 0);
   h.channel.failHistory = false;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   h.channel.bits = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages];
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /Permissions insuffisantes/);
   assert.equal(h.channel.deleted, undefined);
@@ -267,10 +267,10 @@ test('permissions ou historique indisponibles bloquent rappel et suppression', a
 
 test('la pagination détecte une réponse derrière plus de 100 messages de bots', async (t) => {
   const h = harness(t);
-  const humanAt = BASE + 23 * 60 * 60 * 1000;
+  const humanAt = BASE + WARNING_DELAY - 60 * 60 * 1000;
   h.channel.addMessage(humanAt, { authorId: STAFF });
   for (let i = 1; i <= 150; i++) h.channel.addMessage(humanAt + i, { bot: true });
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.ok(h.channel.historyCalls >= 2);
   assert.equal(h.store.get(CHANNEL).lastActivityAt, iso(humanAt));
@@ -281,7 +281,7 @@ test('la pagination détecte une réponse derrière plus de 100 messages de bots
 test('si l’historique est trop volumineux ou mal formé, aucune fermeture ne se produit', async (t) => {
   const h = harness(t);
   for (let i = 1; i <= 1001; i++) h.channel.addMessage(BASE + i, { bot: true });
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /historique trop volumineux/i);
   assert.equal(h.channel.sent.length, 0);
   assert.equal(h.channel.deleted, undefined);
@@ -292,7 +292,7 @@ test('si l’historique est trop volumineux ou mal formé, aucune fermeture ne s
 
 test('un rappel à l’envoi incertain est journalisé et retenté sans fermeture anticipée', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   h.channel.failSend = true;
   h.channel.deliverBeforeError = true;
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /réponse Discord perdue/);
@@ -308,7 +308,7 @@ test('un rappel à l’envoi incertain est journalisé et retenté sans fermetur
   assert.equal(h.channel.sent[0].payload.nonce, pending.nonce);
   assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sent');
   assert.equal(h.store.get(CHANNEL).inactivityReminder.sentAt, iso(h.clock.now));
-  h.clock.now += DAY - 1;
+  h.clock.now += DELETE_DELAY - 1;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   h.clock.now++;
@@ -318,7 +318,7 @@ test('un rappel à l’envoi incertain est journalisé et retenté sans fermetur
 
 test('un message reçu pendant l’envoi du rappel annule la future fermeture', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   let release;
   let started;
   h.channel.sendGate = new Promise((resolve) => { release = resolve; });
@@ -333,7 +333,7 @@ test('un message reçu pendant l’envoi du rappel annule la future fermeture', 
   await Promise.all([check, incoming]);
   assert.equal(h.store.get(CHANNEL).lastActivityAt, iso(h.clock.now));
   assert.equal(h.store.get(CHANNEL).inactivityReminder, null);
-  h.clock.now += DAY;
+  h.clock.now += WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   assert.equal(h.channel.sent.length, 2);
@@ -341,9 +341,9 @@ test('un message reçu pendant l’envoi du rappel annule la future fermeture', 
 
 test('un message reçu pendant la vérification finale empêche la suppression', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   let release;
   let started;
   h.channel.historyGate = new Promise((resolve) => { release = resolve; });
@@ -363,9 +363,9 @@ test('un message reçu pendant la vérification finale empêche la suppression',
 
 test('un échec de fermeture ne supprime rien et une réponse ultérieure annule le rappel', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   h.channel.failDelete = true;
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /salon n’a pas été supprimé/);
   assert.equal(h.store.get(CHANNEL).pendingDeletion, null);
@@ -392,7 +392,7 @@ test('messages étrangers, anciens, de bots et de fils ne modifient pas l’acti
 
 test('tickets fermés ou opérations interrompues sont exclus du traitement automatique', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + 10 * DAY;
+  h.clock.now = BASE + 10 * WARNING_DELAY;
   const original = h.store.get(CHANNEL);
   h.store.save({ ...original, pendingDeletion: { actorId: OWNER, requestedAt: iso(BASE) } });
   assert.equal(inactivityDueAt(h.store.get(CHANNEL)), Infinity);
@@ -413,7 +413,7 @@ test('tickets fermés ou opérations interrompues sont exclus du traitement auto
 });
 
 test('le moniteur évite les passages simultanés et retente après une erreur', async () => {
-  let now = BASE + DAY;
+  let now = BASE + WARNING_DELAY;
   let calls = 0;
   let release;
   let started;
@@ -448,16 +448,16 @@ test('la lecture d’historique refuse une page qui ne permet pas de déterminer
 
 test('si le rappel automatique a été supprimé, un nouveau rappel précède la fermeture', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   const warningId = h.store.get(CHANNEL).inactivityReminder.messageId;
   h.channel.history = h.channel.history.filter((message) => message.id !== warningId);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   assert.deepEqual(await h.service.checkInactivity(h.guild, CHANNEL), { reminded: true });
   assert.equal(h.channel.deleted, undefined);
   assert.equal(h.channel.sent.length, 2);
   assert.notEqual(h.store.get(CHANNEL).inactivityReminder.messageId, warningId);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, true);
 });
@@ -469,28 +469,28 @@ test('une erreur disque après l’envoi n’autorise jamais une suppression san
     if (record.inactivityReminder?.state === 'sent') throw new Error('disque indisponible');
     return save(record);
   };
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /disque indisponible/);
   assert.equal(h.channel.sent.length, 1);
   assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sending');
   h.service.stop();
   const reloaded = new TicketStore(h.config.dataFile, GUILD);
   const service = h.makeService(reloaded);
-  h.clock.now = BASE + 10 * DAY;
+  h.clock.now = BASE + 10 * WARNING_DELAY;
   await service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
   assert.equal(reloaded.get(CHANNEL).inactivityReminder.state, 'sent');
   assert.equal(reloaded.get(CHANNEL).inactivityReminder.sentAt, iso(h.clock.now));
-  h.clock.now += DAY - 1;
+  h.clock.now += DELETE_DELAY - 1;
   await service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, undefined);
 });
 
 test('une suppression Discord confirmée puis interrompue sur disque est finalisée au redémarrage', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   const markDeleted = h.store.markDeleted.bind(h.store);
   h.store.markDeleted = () => { throw new Error('écriture impossible'); };
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /écriture impossible/);
@@ -510,7 +510,7 @@ test('le moniteur ignore les tickets non dus et continue après l’erreur d’u
   const seen = [];
   const one = ticket();
   const two = { ...ticket(), channelId: '400000000000000002', number: 2 };
-  const three = { ...ticket(BASE + DAY), channelId: '400000000000000003', number: 3 };
+  const three = { ...ticket(BASE + WARNING_DELAY), channelId: '400000000000000003', number: 3 };
   const service = {
     stopped: false,
     store: { list: () => [one, two, three] },
@@ -519,7 +519,7 @@ test('le moniteur ignore les tickets non dus et continue après l’erreur d’u
       if (id === one.channelId) throw new Error('erreur réseau');
     },
   };
-  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + DAY });
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + WARNING_DELAY });
   monitor.stopped = false;
   await monitor.run();
   assert.deepEqual(seen, [one.channelId, two.channelId]);
@@ -532,19 +532,19 @@ test('le registre valide les dates et ne permet pas un rappel anticipé ou incoh
   for (const change of [
     { lastActivityAt: 'date invalide' },
     { lastActivityAt: iso(BASE - 1) },
-    { inactivityReminder: { state: 'sent', activityAt: iso(BASE), sentAt: iso(BASE + DAY - 1), messageId: '500000000000000001' } },
-    { inactivityReminder: { state: 'sending', activityAt: iso(BASE), attemptedAt: iso(BASE + DAY), nonce: 'invalide' } },
-    { inactivityReminder: { state: 'sent', activityAt: iso(BASE + 100), sentAt: iso(BASE + DAY + 100), messageId: '500000000000000001' } },
-    { inactivityReminder: { state: 'sent', activityAt: iso(BASE), sentAt: iso(BASE + DAY), messageId: 'mauvais-id' } },
+    { inactivityReminder: { state: 'sent', activityAt: iso(BASE), sentAt: iso(BASE + WARNING_DELAY - 1), messageId: '500000000000000001' } },
+    { inactivityReminder: { state: 'sending', activityAt: iso(BASE), attemptedAt: iso(BASE + WARNING_DELAY), nonce: 'invalide' } },
+    { inactivityReminder: { state: 'sent', activityAt: iso(BASE + 100), sentAt: iso(BASE + WARNING_DELAY + 100), messageId: '500000000000000001' } },
+    { inactivityReminder: { state: 'sent', activityAt: iso(BASE), sentAt: iso(BASE + WARNING_DELAY), messageId: 'mauvais-id' } },
   ]) assert.throws(() => h.store.save({ ...original, ...change }), /ticket invalide/);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(new TicketStore(h.config.dataFile, GUILD).get(CHANNEL).inactivityReminder.state, 'sent');
 });
 
 test('une réponse après un envoi incertain annule le journal de rappel avant toute relance', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   h.channel.failSend = true;
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /envoi Discord impossible/);
   assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sending');
@@ -560,9 +560,9 @@ test('une réponse après un envoi incertain annule le journal de rappel avant t
 
 test('un message reçu pendant la vérification du rappel bloque aussi la suppression', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   const fetch = h.channel.messages.fetch;
   let release;
   let started;
@@ -593,7 +593,7 @@ test('le moniteur démarre immédiatement et s’arrête sans laisser de minuter
     stopped: false, store: { list: () => [ticket()] },
     async checkInactivity() { calls++; notify(); },
   };
-  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + DAY, intervalMs: 1000 });
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + WARNING_DELAY, intervalMs: 1000 });
   monitor.start();
   await checked;
   monitor.stop();
@@ -605,13 +605,13 @@ test('le moniteur démarre immédiatement et s’arrête sans laisser de minuter
 
 test('une ancienne réponse manquée relance un avertissement au lieu de fermer au redémarrage', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   h.service.stop();
-  h.channel.addMessage(BASE + DAY + 1000);
+  h.channel.addMessage(BASE + WARNING_DELAY + 1000);
   const reloaded = new TicketStore(h.config.dataFile, GUILD);
   const restarted = h.makeService(reloaded);
-  h.clock.now = BASE + 5 * DAY;
+  h.clock.now = BASE + 5 * WARNING_DELAY;
   assert.deepEqual(await restarted.checkInactivity(h.guild, CHANNEL), { reminded: true });
   assert.equal(h.channel.sent.length, 2);
   assert.equal(h.channel.deleted, undefined);
@@ -620,9 +620,9 @@ test('une ancienne réponse manquée relance un avertissement au lieu de fermer 
 
 test('une réponse non encore reçue par la passerelle pendant le contrôle du rappel est retrouvée avant suppression', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
-  h.clock.now += DAY;
+  h.clock.now += DELETE_DELAY;
   const fetch = h.channel.messages.fetch;
   h.channel.messages.fetch = async (options) => {
     const result = await fetch(options);
@@ -637,13 +637,13 @@ test('une réponse non encore reçue par la passerelle pendant le contrôle du r
 
 test('un rappel manuel après l’avertissement automatique ne prolonge pas le délai', async (t) => {
   const h = harness(t);
-  h.clock.now = BASE + DAY;
+  h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   const automatic = h.store.get(CHANNEL).inactivityReminder;
-  h.clock.now += DAY / 2;
+  h.clock.now += DELETE_DELAY / 2;
   await h.service.remindOwner(h.guild, CHANNEL, STAFF);
   assert.deepEqual(h.store.get(CHANNEL).inactivityReminder, automatic);
-  h.clock.now = BASE + 2 * DAY;
+  h.clock.now = BASE + WARNING_DELAY + DELETE_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.deleted, true);
 });
