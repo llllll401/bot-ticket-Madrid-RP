@@ -3,8 +3,40 @@ export const INACTIVITY_WARNING_DELAY_MS = 2 * 60 * 60 * 1000;
 export const INACTIVITY_DELETION_DELAY_MS = 2 * 60 * 60 * 1000;
 export const INACTIVITY_RETRY_MS = 5 * 60 * 1000;
 export const INACTIVITY_SCAN_MS = 60 * 1000;
+export const INACTIVITY_REMINDER_GAP_MS = 3 * 1000;
+export const INACTIVITY_TIME_ZONE = 'Europe/Paris';
 const HISTORY_PAGE_SIZE = 100;
 const MAX_HISTORY_PAGES = 10;
+const AUTOMATION_START_MINUTES = 10 * 60 + 30;
+const AUTOMATION_END_MINUTES = 20 * 60 + 30;
+const parisClockFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: INACTIVITY_TIME_ZONE, hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+});
+
+function parisMinutes(timestamp) {
+  const parts = parisClockFormatter.formatToParts(new Date(timestamp));
+  const values = Object.fromEntries(parts.filter((part) => ['hour', 'minute'].includes(part.type)).map((part) => [part.type, part.value]));
+  return Number(values.hour) * 60 + Number(values.minute);
+}
+
+// Les actions automatiques sont limitées à la plage horaire du serveur Rennes RP,
+// y compris lors des changements d’heure Europe/Paris.
+export function isInactivityAutomationActive(timestamp = Date.now()) {
+  if (!Number.isFinite(timestamp)) return false;
+  const minutes = parisMinutes(timestamp);
+  return minutes >= AUTOMATION_START_MINUTES && minutes < AUTOMATION_END_MINUTES;
+}
+
+function nextInactivityAutomationStartAt(timestamp) {
+  const roundedMinute = Math.floor(timestamp / 60_000) * 60_000;
+  // Parcourir des minutes UTC laisse Intl gérer correctement les heures d’été/hiver.
+  for (let offset = 1; offset <= 26 * 60; offset++) {
+    const candidate = roundedMinute + offset * 60_000;
+    if (parisMinutes(candidate) === AUTOMATION_START_MINUTES) return candidate;
+  }
+  // Ne devrait jamais être atteint ; évite néanmoins une boucle agressive si Intl échoue.
+  return timestamp + 60 * 60 * 1000;
+}
 
 export function inactivityDueAt(ticket) {
   if (!ticket || ['closed', 'deleted'].includes(ticket.status)
@@ -56,6 +88,7 @@ export class InactivityMonitor {
     this.clock = clock;
     this.intervalMs = intervalMs;
     this.retryAfter = new Map();
+    this.nextReminderAt = 0;
     this.timer = null;
     this.stopped = true;
     this.running = false;
@@ -64,18 +97,27 @@ export class InactivityMonitor {
 
   async run() {
     if (this.running || this.stopped) return;
+    const startedAt = this.clock();
+    if (!isInactivityAutomationActive(startedAt) || this.nextReminderAt > startedAt) return;
     this.running = true;
     try {
       const tickets = this.service.store.list();
       const active = new Set(tickets.filter((ticket) => !['closed', 'deleted'].includes(ticket.status)).map((ticket) => ticket.channelId));
       for (const id of this.retryAfter.keys()) if (!active.has(id)) this.retryAfter.delete(id);
       for (const ticket of tickets) {
-        if (this.stopped || this.service.stopped) break;
         const currentTime = this.clock();
+        if (this.stopped || this.service.stopped || !isInactivityAutomationActive(currentTime)) break;
         if (inactivityDueAt(ticket) > currentTime || (this.retryAfter.get(ticket.channelId) ?? 0) > currentTime) continue;
         try {
-          await this.service.checkInactivity(this.guild, ticket.channelId);
+          const result = await this.service.checkInactivity(this.guild, ticket.channelId);
           this.retryAfter.delete(ticket.channelId);
+          // À la réouverture de la plage horaire, les tickets peuvent tous être
+          // dus. Échelonner les messages évite de mentionner tous les membres
+          // d’un coup, tout en laissant le prochain passage traiter le suivant.
+          if (result?.reminded) {
+            this.nextReminderAt = this.clock() + INACTIVITY_REMINDER_GAP_MS;
+            break;
+          }
         } catch (error) {
           this.retryAfter.set(ticket.channelId, this.clock() + INACTIVITY_RETRY_MS);
           this.logger.error(`Impossible de vérifier l’inactivité du ticket #${ticket.number} :`, error);
@@ -86,6 +128,15 @@ export class InactivityMonitor {
     }
   }
 
+  nextRunDelay() {
+    const currentTime = this.clock();
+    if (!isInactivityAutomationActive(currentTime)) {
+      return Math.max(1, nextInactivityAutomationStartAt(currentTime) - currentTime);
+    }
+    if (this.nextReminderAt > currentTime) return Math.max(1, this.nextReminderAt - currentTime);
+    return this.intervalMs;
+  }
+
   start() {
     if (!this.stopped) return;
     this.stopped = false;
@@ -94,7 +145,7 @@ export class InactivityMonitor {
       try { await this.run(); }
       catch (error) { this.logger.error('Vérification des tickets inactifs impossible :', error); }
       if (!this.stopped && generation === this.generation) {
-        this.timer = setTimeout(tick, this.intervalMs);
+        this.timer = setTimeout(tick, this.nextRunDelay());
         this.timer.unref?.();
       }
     };

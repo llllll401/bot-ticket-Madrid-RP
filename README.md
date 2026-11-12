@@ -125,6 +125,7 @@ Un menu public avec les six types apparaît. Le salon du panneau doit être visi
 
 ### Rappel et fermeture automatiques
 
+- L’automatisation des rappels et suppressions fonctionne uniquement entre **10 h 30 et 20 h 30, heure de Paris**. En dehors de cette plage, elle n’envoie aucun rappel et ne supprime aucun ticket. À la reprise à 10 h 30, les rappels dus sont échelonnés avec au moins **3 secondes** entre chacun.
 - Après **2 h sans message humain dans le salon principal du ticket**, le bot mentionne le créateur et avertit que le salon et ses messages seront supprimés après 2 h supplémentaires sans activité. Une réponse de n’importe quel membre, y compris du staff, remet le compteur à zéro et annule le rappel en cours.
 - Les messages de bots et de webhooks, les clics sur les boutons et les messages dans des **fils Discord séparés** ne comptent pas : répondez dans le salon principal pour éviter la fermeture. Un rappel manuel ne décale pas le rappel automatique. Les tickets ouverts marqués « traité » sont aussi concernés ; les anciens tickets déjà fermés en lecture seule sont exclus.
 - Si aucun membre n’écrit dans le salon principal pendant les **2 h qui suivent le rappel automatique**, le bot ferme le ticket en **supprimant son salon et tous ses messages**, sans transcription et sans confirmation supplémentaire. Les notes internes du registre sont effacées comme lors d’une fermeture manuelle. Le bot effectue une vérification périodique : les horaires peuvent être retardés et il doit être en ligne pour agir.
