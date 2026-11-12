@@ -155,6 +155,9 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   assert.equal(Boolean(button(open, IDS.manage).disabled), false);
   assert.equal(Boolean(button(open, IDS.remindOwner).disabled), false);
   assert.equal(Boolean(button(open, IDS.close).disabled), false);
+  assert.equal(open.components.length, 2);
+  assert.equal(button(open, IDS.changeCategory).label, 'Changer la catégorie');
+  assert.equal(button(open, IDS.contactRole).label, 'Contacter un rôle');
   assert.equal(button(open, IDS.claim), undefined);
   assert.equal(button(open, IDS.waiting), undefined);
   assert.equal(button(open, IDS.urgent), undefined);
@@ -163,7 +166,7 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   assert.match(urgent.embeds[0].toJSON().fields[3].value, /Urgente/);
   const menu = dossierMenu(record(), OWNER);
   const options = menu.components[0].toJSON().components[0].options.map((option) => option.value);
-  assert.deepEqual(options, ['claim', 'progress', 'resolve', 'waiting', 'priority', 'category', 'note-add', 'note-list', 'role']);
+  assert.deepEqual(options, ['claim', 'progress', 'resolve', 'waiting', 'priority', 'note-add', 'note-list']);
   const closed = ticketPanel({ ...record(), status: 'closed' });
   assert.equal(closed.components[0].toJSON().components.some((item) => item.custom_id.startsWith(IDS.assignmentToggle)), false);
   assert.equal(button(closed, IDS.claim), undefined);

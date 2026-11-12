@@ -6,7 +6,7 @@ import { STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from '
 import { MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 
 // Incrémenter si les boutons de gestion doivent être mis à jour sur les anciens tickets.
-export const TICKET_PANEL_VERSION = 6;
+export const TICKET_PANEL_VERSION = 7;
 
 export const IDS = Object.freeze({
   open: 'tickets:open',
@@ -25,6 +25,8 @@ export const IDS = Object.freeze({
   roleMessageInput: 'message',
   assignmentToggle: 'ticket:assignment:',
   remindOwner: 'ticket:remind-owner',
+  changeCategory: 'ticket:change-category',
+  contactRole: 'ticket:contact-role',
   claim: 'ticket:claim',
   claimTakeover: 'ticket:claim:takeover:',
   waiting: 'ticket:waiting',
@@ -94,14 +96,20 @@ export function ticketPanel(ticket) {
       new ButtonBuilder().setCustomId(IDS.reopen).setLabel('Rouvrir l’ancien ticket').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(IDS.delete).setLabel('Supprimer le salon').setStyle(ButtonStyle.Danger),
     )]
-    : [new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
-        .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
-    )];
+    : [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
+          .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(IDS.changeCategory).setLabel('Changer la catégorie').setEmoji('📂').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(IDS.contactRole).setLabel('Contacter un rôle').setEmoji('📣').setStyle(ButtonStyle.Secondary),
+      ),
+    ];
   return {
     content: `Bienvenue <@${ticket.ownerId}> ! Décrivez votre demande et patientez. Équipe concernée : ${ticket.staffRoleIds.map((id) => `<@&${id}>`).join(' ')}`,
     embeds: [embed], components: rows, allowedMentions: { parse: [] },
@@ -144,10 +152,8 @@ export function dossierMenu(ticket, viewerId, notice = '') {
       { label: 'Marquer traité', value: 'resolve', emoji: '🟢' },
       { label: 'Remettre en attente', value: 'waiting', emoji: '🔴' },
       { label: 'Modifier la priorité', value: 'priority', emoji: '🚨' },
-      { label: 'Changer la catégorie', value: 'category', emoji: '📂' },
       { label: 'Ajouter une note interne', value: 'note-add', emoji: '📝' },
       { label: 'Consulter les notes internes', value: 'note-list', emoji: '🔒' },
-      { label: 'Contacter un rôle', value: 'role', emoji: '📣' },
     );
   const summary = `**Gestion du ticket #${ticketNumber(ticket.number)}** · ${TYPE_BY_KEY[ticket.type].label}\n`
     + `${escapeMarkdown(statusLabel(ticket))} · Priorité : ${ticket.urgent ? '🚨 urgente' : 'normale'} · Notes internes : ${(ticket.internalNotes ?? []).length}`;

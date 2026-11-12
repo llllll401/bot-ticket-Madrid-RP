@@ -1331,18 +1331,26 @@ test('la suppression confirmée ne dépend pas de restaurer une ancienne transit
   assert.equal(h.guild.channelMap.has(channel.id), false);
 });
 
-test('Gérer le dossier rassemble les actions et reste réservé au staff qui voit le salon', async (t) => {
+test('les boutons Catégorie et Rôle sont directs, et le dossier reste réservé au staff qui voit le salon', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h);
   const owner = await press(h, channel, IDS.manage, { userId: OWNER, permissions: [PermissionFlagsBits.ViewChannel] });
   assert.match(owner.response.content, /Seule l’équipe/);
+  const ownerCategory = await press(h, channel, IDS.changeCategory, { userId: OWNER, permissions: [PermissionFlagsBits.ViewChannel] });
+  assert.match(ownerCategory.response.content, /Seule l’équipe/);
   const hiddenStaff = await press(h, channel, IDS.manage, { userId: STAFF, roles: [ROLE] });
   assert.match(hiddenStaff.response.content, /voir ce salon/);
+  const category = await press(h, channel, IDS.changeCategory, staffAccess);
+  assert.equal(category.response.flags, MessageFlags.Ephemeral);
+  assert.equal(category.response.components[0].toJSON().components[0].custom_id, `${IDS.manageCategory}${STAFF}`);
+  const role = await press(h, channel, IDS.contactRole, staffAccess);
+  assert.equal(role.response.flags, MessageFlags.Ephemeral);
+  assert.equal(role.response.components[0].toJSON().components[0].custom_id, `${IDS.manageRoleSelect}${STAFF}`);
   const staff = await press(h, channel, IDS.manage, staffAccess);
   assert.equal(staff.response.flags, MessageFlags.Ephemeral);
   const menu = staff.response.components[0].toJSON().components[0];
   assert.equal(menu.custom_id, `${IDS.manageMenu}${STAFF}`);
-  assert.deepEqual(menu.options.map((option) => option.value), ['claim', 'progress', 'resolve', 'waiting', 'priority', 'category', 'note-add', 'note-list', 'role']);
+  assert.deepEqual(menu.options.map((option) => option.value), ['claim', 'progress', 'resolve', 'waiting', 'priority', 'note-add', 'note-list']);
   const stranger = await choose(h, channel, menu.custom_id, 'note-list', { userId: STRANGER, roles: [ROLE] });
   assert.match(stranger.response.content, /personnel/);
   assert.ok(!stranger.response.embeds?.length);
@@ -1421,10 +1429,10 @@ test('les notes internes restent privées, paginées et effacées lors de la sup
   assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Enquête privée'));
 });
 
-test('le message au rôle est public, n’ouvre pas le salon et ne notifie que le rôle choisi', async (t) => {
+test('le bouton Contacter un rôle publie un message sans ouvrir le salon ni notifier un autre rôle', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h);
-  const submenu = await manageAction(h, channel, 'role');
+  const submenu = await press(h, channel, IDS.contactRole, staffAccess);
   assert.match(submenu.response.content, /publié dans ce ticket.*visible par son créateur/);
   assert.match(submenu.response.content, /ne lui donne pas accès/);
   const selector = interaction(h.guild, { kind: 'role-select', channel, customId: `${IDS.manageRoleSelect}${STAFF}`, values: [NEW_ROLE], ...staffAccess });
@@ -1474,7 +1482,7 @@ test('changer le type déplace le salon, applique les nouveaux rôles et remet l
   await waitForName(h.store, channel);
   await channel.permissionOverwrites.edit(NEW_ROLE, { ViewChannel: true }); // accès manuel distinct
   channel.permissionEvents.length = 0;
-  const submenu = await manageAction(h, channel, 'category');
+  const submenu = await press(h, channel, IDS.changeCategory, staffAccess);
   assert.equal(submenu.response.components[0].toJSON().components[0].custom_id, `${IDS.manageCategory}${STAFF}`);
   const selected = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'rc_staff');
   assert.match(selected.response.content, /responsable libéré.*remis en attente/);
