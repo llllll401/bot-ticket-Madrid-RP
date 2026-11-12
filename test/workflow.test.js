@@ -219,7 +219,7 @@ function interaction(guild, options = {}) {
 }
 
 function harness(t, overrides = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'madrid-tickets-flow-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rennes-tickets-flow-'));
   let service;
   t.after(() => { service?.stop(); fs.rmSync(dir, { recursive: true, force: true }); });
   const rawConfig = {
@@ -1492,6 +1492,13 @@ test('changer le type déplace le salon, applique les nouveaux rôles et remet l
   assert.equal(channel.parentId, CATEGORIES.rc_staff);
   assert.equal(channel.channelEditOptions.lockPermissions, false);
   assert.match(channel.topic, /RC STAFF/);
+  // Le message d'ouverture (panneau) est modifié en place : même ID, nouvelle catégorie.
+  assert.equal(ticket.panelMessageId, channel.sent[0].id);
+  const panel = channel.messageMap.get(ticket.panelMessageId).payload;
+  assert.match(panel.embeds[0].toJSON().title, /Ticket #\d{4} • RC STAFF/);
+  assert.match(panel.embeds[0].toJSON().fields.find((field) => field.name === 'Statut').value, /En attente/);
+  assert.match(panel.content, new RegExp(`<@&${SPECIAL_ROLE}>`));
+  assert.ok(!panel.content.includes(`<@&${ROLE}>`));
   assert.equal(channel.permissionOverwrites.cache.has(ROLE), false);
   assert.equal(permission(channel, SPECIAL_ROLE, 'ViewChannel'), true);
   assert.equal(permission(channel, NEW_ROLE, 'ViewChannel'), true);

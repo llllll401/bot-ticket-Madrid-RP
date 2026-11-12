@@ -44,7 +44,7 @@ function makeHarness(t) {
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
   t.after(() => client.destroy());
   const roles = [role(GUILD, '@everyone'), role(ROLE, 'Staff'), role(SPECIAL, 'RC STAFF'), role(ADMIN_ROLE, 'Admin', String(PermissionFlagsBits.Administrator))];
-  const guild = client.guilds._add({ id: GUILD, name: 'Madrid RP', owner_id: '800000000000000001', roles, channels: [] });
+  const guild = client.guilds._add({ id: GUILD, name: 'Rennes RP', owner_id: '800000000000000001', roles, channels: [] });
   const api = {
     roles, channels: [], requests: [], fail: null, hook: null,
     members: new Map([

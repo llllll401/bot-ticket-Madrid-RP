@@ -47,7 +47,7 @@ export const IDS = Object.freeze({
 export function publicPanel() {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('🎫 Tickets • Madrid RP')
+    .setTitle('🎫 Tickets • Rennes RP')
     .setDescription(
       'Besoin d’aide ? Choisissez le type de votre demande ci-dessous.\n' +
       'Un salon privé sera créé pour vous et l’équipe concernée. Merci d’y expliquer votre demande.\n' +
