@@ -6,7 +6,7 @@ import { STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from '
 import { MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 
 // Incrémenter si les boutons de gestion doivent être mis à jour sur les anciens tickets.
-export const TICKET_PANEL_VERSION = 6;
+export const TICKET_PANEL_VERSION = 7;
 
 export const IDS = Object.freeze({
   open: 'tickets:open',
@@ -25,6 +25,8 @@ export const IDS = Object.freeze({
   roleMessageInput: 'message',
   assignmentToggle: 'ticket:assignment:',
   remindOwner: 'ticket:remind-owner',
+  changeCategory: 'ticket:change-category',
+  contactRole: 'ticket:contact-role',
   claim: 'ticket:claim',
   claimTakeover: 'ticket:claim:takeover:',
   waiting: 'ticket:waiting',
@@ -52,7 +54,7 @@ export function publicPanel() {
       'Besoin d’aide ? Choisissez le type de votre demande ci-dessous.\n' +
       'Un salon privé sera créé pour vous et l’équipe concernée. Merci d’y expliquer votre demande.\n' +
       'Fermer un ticket supprime définitivement le salon et ses messages après confirmation, sans transcription automatique. '
-      + 'Après 24 h sans message humain dans le salon principal du ticket, un rappel est envoyé ; sans nouveau message dans ce salon pendant 24 h, il sera supprimé automatiquement.',
+      + 'Après 2 h sans message humain dans le salon principal du ticket, un rappel est envoyé ; sans nouveau message dans ce salon dans l’heure qui suit, il sera supprimé automatiquement.',
     )
     .addFields({
       name: 'Suivi des tickets',
@@ -77,7 +79,7 @@ export function ticketPanel(ticket) {
     .setTitle(`🎫 Ticket #${ticketNumber(ticket.number)} • ${TYPE_BY_KEY[ticket.type].label}`)
     .setDescription(closed
       ? 'Ancien ticket fermé avant la mise à jour. L’équipe peut le rouvrir ou supprimer définitivement son salon.'
-      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés. Après 24 h sans message humain dans ce salon principal, un rappel précède une suppression automatique 24 h plus tard si personne n’y répond. Les messages dans les fils ne comptent pas.')
+      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés. Après 2 h sans message humain dans ce salon principal, un rappel précède une suppression automatique une heure plus tard si personne n’y répond. Les messages dans les fils ne comptent pas.')
     .addFields(
       { name: 'Créateur', value: `<@${ticket.ownerId}>`, inline: true },
       { name: 'Statut', value: escapeMarkdown(statusLabel(ticket)), inline: true },
@@ -94,14 +96,20 @@ export function ticketPanel(ticket) {
       new ButtonBuilder().setCustomId(IDS.reopen).setLabel('Rouvrir l’ancien ticket').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(IDS.delete).setLabel('Supprimer le salon').setStyle(ButtonStyle.Danger),
     )]
-    : [new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
-        .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
-    )];
+    : [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
+          .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(IDS.changeCategory).setLabel('Changer la catégorie').setEmoji('📂').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(IDS.contactRole).setLabel('Contacter un rôle').setEmoji('📣').setStyle(ButtonStyle.Secondary),
+      ),
+    ];
   return {
     content: `Bienvenue <@${ticket.ownerId}> ! Décrivez votre demande et patientez. Équipe concernée : ${ticket.staffRoleIds.map((id) => `<@&${id}>`).join(' ')}`,
     embeds: [embed], components: rows, allowedMentions: { parse: [] },
@@ -144,10 +152,8 @@ export function dossierMenu(ticket, viewerId, notice = '') {
       { label: 'Marquer traité', value: 'resolve', emoji: '🟢' },
       { label: 'Remettre en attente', value: 'waiting', emoji: '🔴' },
       { label: 'Modifier la priorité', value: 'priority', emoji: '🚨' },
-      { label: 'Changer la catégorie', value: 'category', emoji: '📂' },
       { label: 'Ajouter une note interne', value: 'note-add', emoji: '📝' },
       { label: 'Consulter les notes internes', value: 'note-list', emoji: '🔒' },
-      { label: 'Contacter un rôle', value: 'role', emoji: '📣' },
     );
   const summary = `**Gestion du ticket #${ticketNumber(ticket.number)}** · ${TYPE_BY_KEY[ticket.type].label}\n`
     + `${escapeMarkdown(statusLabel(ticket))} · Priorité : ${ticket.urgent ? '🚨 urgente' : 'normale'} · Notes internes : ${(ticket.internalNotes ?? []).length}`;

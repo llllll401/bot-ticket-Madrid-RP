@@ -153,6 +153,15 @@ export function createInteractionHandler({ config, service, logger = console }) 
       await interaction.editReply({ content: '✅ Rappel envoyé au créateur dans ce ticket.', allowedMentions: { parse: [] } });
       return true;
     }
+    if (button && [IDS.changeCategory, IDS.contactRole].includes(id)) {
+      const ticket = service.requireTicket(interaction.channelId);
+      ensureDossierAccess(interaction, ticket, config);
+      const payload = id === IDS.changeCategory
+        ? dossierCategory(ticket, interaction.user.id)
+        : dossierRoleSelector(interaction.user.id);
+      await interaction.reply({ ...payload, ...ephemeral });
+      return true;
+    }
     if (button && id === IDS.manage) {
       const ticket = service.requireTicket(interaction.channelId);
       ensureDossierAccess(interaction, ticket, config);

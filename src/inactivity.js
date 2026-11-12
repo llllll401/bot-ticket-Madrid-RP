@@ -1,5 +1,6 @@
 // Un rappel n'est jamais considéré comme une activité humaine.
-export const INACTIVITY_DELAY_MS = 24 * 60 * 60 * 1000;
+export const INACTIVITY_WARNING_DELAY_MS = 2 * 60 * 60 * 1000;
+export const INACTIVITY_DELETION_DELAY_MS = 60 * 60 * 1000;
 export const INACTIVITY_RETRY_MS = 5 * 60 * 1000;
 export const INACTIVITY_SCAN_MS = 60 * 1000;
 const HISTORY_PAGE_SIZE = 100;
@@ -10,8 +11,8 @@ export function inactivityDueAt(ticket) {
     || ticket.pendingDeletion || ticket.pendingTransition || ticket.pendingReclassification) return Infinity;
   const reminder = ticket.inactivityReminder;
   if (reminder?.state === 'sending') return Date.parse(reminder.attemptedAt) + INACTIVITY_RETRY_MS;
-  if (reminder?.state === 'sent') return Date.parse(reminder.sentAt) + INACTIVITY_DELAY_MS;
-  return Date.parse(ticket.lastActivityAt ?? ticket.createdAt) + INACTIVITY_DELAY_MS;
+  if (reminder?.state === 'sent') return Date.parse(reminder.sentAt) + INACTIVITY_DELETION_DELAY_MS;
+  return Date.parse(ticket.lastActivityAt ?? ticket.createdAt) + INACTIVITY_WARNING_DELAY_MS;
 }
 
 // Vérifie l'historique via REST avant chaque rappel ou suppression. Si la
