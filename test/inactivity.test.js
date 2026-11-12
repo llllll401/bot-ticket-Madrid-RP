@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ChannelType, MessagePayload, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
-import { INACTIVITY_WARNING_DELAY_MS as WARNING_DELAY, INACTIVITY_DELETION_DELAY_MS as DELETE_DELAY, INACTIVITY_RETRY_MS, InactivityMonitor, inactivityDueAt, latestHumanMessageSince } from '../src/inactivity.js';
+import {
+  INACTIVITY_WARNING_DELAY_MS as WARNING_DELAY, INACTIVITY_DELETION_DELAY_MS as DELETE_DELAY,
+  INACTIVITY_REMINDER_GAP_MS, INACTIVITY_RETRY_MS, InactivityMonitor, inactivityDueAt,
+  isInactivityAutomationActive, latestHumanMessageSince,
+} from '../src/inactivity.js';
 import { loadConfig } from '../src/config.js';
 import { TicketStore } from '../src/store.js';
 import { TicketService } from '../src/ticket-service.js';
@@ -17,6 +21,10 @@ const BOT = '110000000000000003';
 const ROLE = '200000000000000001';
 const CHANNEL = '400000000000000001';
 const BASE = Date.parse('2026-01-01T00:00:00.000Z');
+// Le 1er janvier, Paris est à UTC+1 : 09:30 UTC correspond à 10:30 à Paris.
+const PARIS_WINDOW_START = Date.parse('2026-01-01T09:30:00.000Z');
+const PARIS_ACTIVE_TIME = Date.parse('2026-01-01T11:00:00.000Z');
+const PARIS_WINDOW_END = Date.parse('2026-01-01T19:30:00.000Z');
 const permissions = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory,
   PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels];
 const silent = { error() {}, warn() {} };
@@ -413,7 +421,7 @@ test('tickets fermés ou opérations interrompues sont exclus du traitement auto
 });
 
 test('le moniteur évite les passages simultanés et retente après une erreur', async () => {
-  let now = BASE + WARNING_DELAY;
+  let now = PARIS_ACTIVE_TIME;
   let calls = 0;
   let release;
   let started;
@@ -436,6 +444,64 @@ test('le moniteur évite les passages simultanés et retente après une erreur',
   now += INACTIVITY_RETRY_MS;
   await monitor.run();
   assert.equal(calls, 2);
+  monitor.stop();
+});
+
+test('les actions automatiques ne fonctionnent qu’entre 10 h 30 et 20 h 30, heure de Paris', () => {
+  assert.equal(isInactivityAutomationActive(PARIS_WINDOW_START - 1), false);
+  assert.equal(isInactivityAutomationActive(PARIS_WINDOW_START), true);
+  assert.equal(isInactivityAutomationActive(PARIS_WINDOW_END - 1), true);
+  assert.equal(isInactivityAutomationActive(PARIS_WINDOW_END), false);
+  // En été, Paris est à UTC+2 : vérifier aussi le changement d’heure.
+  assert.equal(isInactivityAutomationActive(Date.parse('2026-07-01T08:30:00.000Z')), true);
+  assert.equal(isInactivityAutomationActive(Date.parse('2026-07-01T18:30:00.000Z')), false);
+});
+
+test('le moniteur suspend rappels et suppressions hors de la plage horaire', async () => {
+  let now = PARIS_WINDOW_END;
+  let calls = 0;
+  const service = {
+    stopped: false,
+    store: { list: () => [ticket()] },
+    async checkInactivity() { calls++; },
+  };
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => now });
+  monitor.stopped = false;
+  await monitor.run();
+  assert.equal(calls, 0);
+  now = PARIS_WINDOW_START;
+  await monitor.run();
+  assert.equal(calls, 1);
+  monitor.stop();
+});
+
+test('le moniteur espace les rappels automatiques de trois secondes', async () => {
+  let now = PARIS_ACTIVE_TIME;
+  const first = ticket();
+  const second = { ...ticket(), channelId: '400000000000000002', number: 2 };
+  const tickets = [first, second];
+  const calls = [];
+  const service = {
+    stopped: false,
+    store: { list: () => tickets },
+    async checkInactivity(guild, channelId) {
+      calls.push(channelId);
+      const index = tickets.findIndex((ticket) => ticket.channelId === channelId);
+      tickets[index] = { ...tickets[index], inactivityReminder: { state: 'sent', sentAt: iso(now) } };
+      return { reminded: true };
+    },
+  };
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => now });
+  monitor.stopped = false;
+  await monitor.run();
+  assert.deepEqual(calls, [first.channelId]);
+  assert.equal(monitor.nextRunDelay(), INACTIVITY_REMINDER_GAP_MS);
+  now += INACTIVITY_REMINDER_GAP_MS - 1;
+  await monitor.run();
+  assert.deepEqual(calls, [first.channelId]);
+  now++;
+  await monitor.run();
+  assert.deepEqual(calls, [first.channelId, second.channelId]);
   monitor.stop();
 });
 
@@ -510,7 +576,7 @@ test('le moniteur ignore les tickets non dus et continue après l’erreur d’u
   const seen = [];
   const one = ticket();
   const two = { ...ticket(), channelId: '400000000000000002', number: 2 };
-  const three = { ...ticket(BASE + WARNING_DELAY), channelId: '400000000000000003', number: 3 };
+  const three = { ...ticket(PARIS_ACTIVE_TIME), channelId: '400000000000000003', number: 3 };
   const service = {
     stopped: false,
     store: { list: () => [one, two, three] },
@@ -519,7 +585,7 @@ test('le moniteur ignore les tickets non dus et continue après l’erreur d’u
       if (id === one.channelId) throw new Error('erreur réseau');
     },
   };
-  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + WARNING_DELAY });
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => PARIS_ACTIVE_TIME });
   monitor.stopped = false;
   await monitor.run();
   assert.deepEqual(seen, [one.channelId, two.channelId]);
@@ -593,7 +659,7 @@ test('le moniteur démarre immédiatement et s’arrête sans laisser de minuter
     stopped: false, store: { list: () => [ticket()] },
     async checkInactivity() { calls++; notify(); },
   };
-  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => BASE + WARNING_DELAY, intervalMs: 1000 });
+  const monitor = new InactivityMonitor({ guild: { id: GUILD }, service, logger: silent, clock: () => PARIS_ACTIVE_TIME, intervalMs: 1000 });
   monitor.start();
   await checked;
   monitor.stop();
