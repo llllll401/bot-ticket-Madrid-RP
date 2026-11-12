@@ -50,7 +50,7 @@ function record(number = 1) {
 }
 
 function tempDir(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'madrid-tickets-core-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rennes-tickets-core-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

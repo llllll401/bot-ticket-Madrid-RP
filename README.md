@@ -1,4 +1,4 @@
-# Bot de tickets Discord • Madrid RP
+# Bot de tickets Discord • Rennes RP
 
 Un bot de tickets en français pour **un seul serveur Discord**, configurable par son ID. Les membres ouvrent un salon privé depuis un menu ; l’équipe suit le dossier avec des boutons et voit son statut directement dans le nom du salon.
 

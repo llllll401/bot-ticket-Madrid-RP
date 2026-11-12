@@ -38,7 +38,7 @@ function ticket(createdAt = BASE) {
 }
 
 function harness(t, { legacy = false } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'madrid-inactivity-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rennes-inactivity-'));
   const clock = { now: BASE };
   const config = loadConfig({
     token: 'fake-token', serveurId: GUILD, rolesStaff: [ROLE],
