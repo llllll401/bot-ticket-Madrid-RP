@@ -1,6 +1,6 @@
 // Un rappel n'est jamais considéré comme une activité humaine.
 export const INACTIVITY_WARNING_DELAY_MS = 2 * 60 * 60 * 1000;
-export const INACTIVITY_DELETION_DELAY_MS = 60 * 60 * 1000;
+export const INACTIVITY_DELETION_DELAY_MS = 2 * 60 * 60 * 1000;
 export const INACTIVITY_RETRY_MS = 5 * 60 * 1000;
 export const INACTIVITY_SCAN_MS = 60 * 1000;
 const HISTORY_PAGE_SIZE = 100;

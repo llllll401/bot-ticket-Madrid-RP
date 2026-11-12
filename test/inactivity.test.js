@@ -139,7 +139,7 @@ async function record(h, timestamp, options = {}) {
   return message;
 }
 
-test('2 h d’inactivité envoient un rappel, puis 1 h sans message supprime le salon', async (t) => {
+test('2 h d’inactivité envoient un rappel, puis 2 h sans message suppriment le salon', async (t) => {
   const h = harness(t);
   h.clock.now = BASE + WARNING_DELAY - 1;
   await h.service.checkInactivity(h.guild, CHANNEL);
@@ -149,7 +149,7 @@ test('2 h d’inactivité envoient un rappel, puis 1 h sans message supprime le 
   assert.equal(h.channel.sent.length, 1);
   const payload = h.channel.sent[0].payload;
   assert.match(payload.content, new RegExp(`<@${OWNER}>`));
-  assert.match(payload.content, /2 h.*dans l’heure.*supprimés.*sans transcription/);
+  assert.match(payload.content, /2 h.*dans les 2 h.*supprimés.*sans transcription/);
   assert.deepEqual(payload.allowedMentions, { parse: [], users: [OWNER] });
   assert.equal(payload.enforceNonce, true);
   assert.match(payload.nonce, /^[a-f0-9]{24}$/);
@@ -186,7 +186,7 @@ test('tout message humain du salon remet le délai à zéro, mais pas les bots n
   h.clock.now = first + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   assert.equal(h.channel.sent.length, 1);
-  const reply = h.clock.now + 2 * 60 * 60 * 1000;
+  const reply = h.clock.now + DELETE_DELAY / 2;
   await record(h, reply);
   assert.equal(h.store.get(CHANNEL).inactivityReminder, null);
   h.clock.now += WARNING_DELAY;

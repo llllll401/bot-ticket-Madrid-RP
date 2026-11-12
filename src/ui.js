@@ -54,7 +54,7 @@ export function publicPanel() {
       'Besoin d’aide ? Choisissez le type de votre demande ci-dessous.\n' +
       'Un salon privé sera créé pour vous et l’équipe concernée. Merci d’y expliquer votre demande.\n' +
       'Fermer un ticket supprime définitivement le salon et ses messages après confirmation, sans transcription automatique. '
-      + 'Après 2 h sans message humain dans le salon principal du ticket, un rappel est envoyé ; sans nouveau message dans ce salon dans l’heure qui suit, il sera supprimé automatiquement.',
+      + 'Après 2 h sans message humain dans le salon principal du ticket, un rappel est envoyé ; sans nouveau message dans ce salon dans les 2 h qui suivent, il sera supprimé automatiquement.',
     )
     .addFields({
       name: 'Suivi des tickets',
@@ -79,7 +79,7 @@ export function ticketPanel(ticket) {
     .setTitle(`🎫 Ticket #${ticketNumber(ticket.number)} • ${TYPE_BY_KEY[ticket.type].label}`)
     .setDescription(closed
       ? 'Ancien ticket fermé avant la mise à jour. L’équipe peut le rouvrir ou supprimer définitivement son salon.'
-      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés. Après 2 h sans message humain dans ce salon principal, un rappel précède une suppression automatique une heure plus tard si personne n’y répond. Les messages dans les fils ne comptent pas.')
+      : 'Expliquez votre demande ici. Le suivi est réservé à l’équipe. Le créateur ou l’équipe peut fermer : le salon et ses messages seront supprimés. Après 2 h sans message humain dans ce salon principal, un rappel précède une suppression automatique 2 h plus tard si personne n’y répond. Les messages dans les fils ne comptent pas.')
     .addFields(
       { name: 'Créateur', value: `<@${ticket.ownerId}>`, inline: true },
       { name: 'Statut', value: escapeMarkdown(statusLabel(ticket)), inline: true },
