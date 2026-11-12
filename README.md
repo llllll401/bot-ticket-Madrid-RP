@@ -2,7 +2,7 @@
 
 Un bot de tickets en français pour **un seul serveur Discord**, configurable par son ID. Les membres ouvrent un salon privé depuis un menu ; l’équipe suit le dossier avec des boutons et voit son statut directement dans le nom du salon.
 
-> **Attention : fermer un ticket supprime définitivement son salon et tous ses messages. La fermeture manuelle demande confirmation ; une fermeture automatique peut aussi avoir lieu après un rappel et 1 h supplémentaire sans activité. Aucune transcription automatique n’est créée.**
+> **Attention : fermer un ticket supprime définitivement son salon et tous ses messages. La fermeture manuelle demande confirmation ; une fermeture automatique peut aussi avoir lieu après un rappel et 2 h supplémentaires sans activité. Aucune transcription automatique n’est créée.**
 
 ## Types de tickets
 
@@ -125,10 +125,10 @@ Un menu public avec les six types apparaît. Le salon du panneau doit être visi
 
 ### Rappel et fermeture automatiques
 
-- Après **2 h sans message humain dans le salon principal du ticket**, le bot mentionne le créateur et avertit que le salon et ses messages seront supprimés après 1 h supplémentaire sans activité. Une réponse de n’importe quel membre, y compris du staff, remet le compteur à zéro et annule le rappel en cours.
+- Après **2 h sans message humain dans le salon principal du ticket**, le bot mentionne le créateur et avertit que le salon et ses messages seront supprimés après 2 h supplémentaires sans activité. Une réponse de n’importe quel membre, y compris du staff, remet le compteur à zéro et annule le rappel en cours.
 - Les messages de bots et de webhooks, les clics sur les boutons et les messages dans des **fils Discord séparés** ne comptent pas : répondez dans le salon principal pour éviter la fermeture. Un rappel manuel ne décale pas le rappel automatique. Les tickets ouverts marqués « traité » sont aussi concernés ; les anciens tickets déjà fermés en lecture seule sont exclus.
-- Si aucun membre n’écrit dans le salon principal pendant l’**heure qui suit le rappel automatique**, le bot ferme le ticket en **supprimant son salon et tous ses messages**, sans transcription et sans confirmation supplémentaire. Les notes internes du registre sont effacées comme lors d’une fermeture manuelle. Le bot effectue une vérification périodique : les horaires peuvent être retardés et il doit être en ligne pour agir.
-- Les tickets déjà ouverts sont concernés : ceux qui sont inactifs depuis plus de 2 h peuvent recevoir un rappel dès la mise à jour. Les dates et l’état du rappel sont conservés au redémarrage. Si le bot était arrêté avant le premier rappel, il envoie d’abord un avertissement et laisse toujours 1 h après son envoi confirmé. Il vérifie l’historique du salon avant un rappel et avant une suppression ; s’il ne peut pas vérifier les permissions ou l’historique, il reporte l’action plutôt que de fermer à l’aveugle. Si le message d’avertissement a été supprimé, un nouveau rappel est envoyé et un nouveau délai commence. Une interruption pendant l’envoi peut conduire à un rappel répété, mais pas à une fermeture sans rappel confirmé. Un message envoyé puis supprimé pendant l’arrêt du bot ne peut toutefois pas être retrouvé dans l’historique.
+- Si aucun membre n’écrit dans le salon principal pendant les **2 h qui suivent le rappel automatique**, le bot ferme le ticket en **supprimant son salon et tous ses messages**, sans transcription et sans confirmation supplémentaire. Les notes internes du registre sont effacées comme lors d’une fermeture manuelle. Le bot effectue une vérification périodique : les horaires peuvent être retardés et il doit être en ligne pour agir.
+- Les tickets déjà ouverts sont concernés : ceux qui sont inactifs depuis plus de 2 h peuvent recevoir un rappel dès la mise à jour. Les dates et l’état du rappel sont conservés au redémarrage. Si le bot était arrêté avant le premier rappel, il envoie d’abord un avertissement et laisse toujours 2 h après son envoi confirmé. Il vérifie l’historique du salon avant un rappel et avant une suppression ; s’il ne peut pas vérifier les permissions ou l’historique, il reporte l’action plutôt que de fermer à l’aveugle. Si le message d’avertissement a été supprimé, un nouveau rappel est envoyé et un nouveau délai commence. Une interruption pendant l’envoi peut conduire à un rappel répété, mais pas à une fermeture sans rappel confirmé. Un message envoyé puis supprimé pendant l’arrêt du bot ne peut toutefois pas être retrouvé dans l’historique.
 
 ### Actions du dossier
 
