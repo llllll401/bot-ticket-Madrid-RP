@@ -533,8 +533,12 @@ export class TicketService {
     // Journaliser avant l'envoi : une réponse incertaine ne peut jamais
     // déclencher la suppression tant qu'un rappel n'est pas confirmé.
     ticket = this.store.save({ ...ticket, inactivityReminder: pending });
+    const automaticDeletionEnabled = this.store.isAutomaticDeletionEnabled();
+    const content = automaticDeletionEnabled
+      ? `⏰ <@${ticket.ownerId}>, ce ticket est inactif depuis 2 h. Répondez dans ce salon principal (pas dans un fil). Sans nouveau message d’un membre dans les 2 h, le salon et tous ses messages seront définitivement supprimés, sans transcription.`
+      : `⏰ <@${ticket.ownerId}>, ce ticket est toujours inactif. Répondez dans ce salon principal (pas dans un fil). La suppression automatique est désactivée : sans nouveau message dans les 2 h, le bot enverra un nouveau rappel.`;
     const message = await channel.send({
-      content: `⏰ <@${ticket.ownerId}>, ce ticket est inactif depuis 2 h. Répondez dans ce salon principal (pas dans un fil). Sans nouveau message d’un membre dans les 2 h, le salon et tous ses messages seront définitivement supprimés, sans transcription.`,
+      content,
       allowedMentions: { parse: [], users: [ticket.ownerId] },
       nonce: pending.nonce, enforceNonce: true,
     });
@@ -561,11 +565,18 @@ export class TicketService {
       if (inactivityDueAt(ticket) > this.clock()) return {};
       const channel = await this.#fetchChannel(guild, ticket);
       if (!channel || this.stopped) return {};
-      await this.#ensureInactivityPermissions(guild, channel, { deleting: ticket.inactivityReminder?.state === 'sent' });
+      await this.#ensureInactivityPermissions(guild, channel, {
+        deleting: ticket.inactivityReminder?.state === 'sent' && this.store.isAutomaticDeletionEnabled(),
+      });
       const latest = await latestHumanMessageSince(channel, Date.parse(ticket.lastActivityAt ?? ticket.createdAt));
       if (latest) ticket = this.#saveActivity(ticket, latest.createdTimestamp);
       ticket = this.#flushPendingActivity(ticket);
       if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
+      if (ticket.inactivityReminder?.state === 'sent' && !this.store.isAutomaticDeletionEnabled()) {
+        // La suppression est désactivée : l’échéance d’une suppression devient
+        // une nouvelle échéance de rappel, sans exiger Gérer les salons.
+        ticket = this.store.save({ ...ticket, inactivityReminder: null });
+      }
       if (ticket.inactivityReminder?.state === 'sent') {
         // Vérifier que l'avertissement est toujours présent et authentique.
         await this.#ensureInactivityPermissions(guild, channel, { deleting: true });
@@ -594,8 +605,11 @@ export class TicketService {
         ticket = this.#flushPendingActivity(ticket);
         if (this.stopped || inactivityDueAt(ticket) > this.clock()) return {};
         if (ticket.inactivityReminder?.state === 'sent') {
-          await this.#deleteConfirmed(guild, ticket, channel, this.botUserId, { automatic: true });
-          return { deleted: true };
+          if (this.store.isAutomaticDeletionEnabled()) {
+            await this.#deleteConfirmed(guild, ticket, channel, this.botUserId, { automatic: true });
+            return { deleted: true };
+          }
+          ticket = this.store.save({ ...ticket, inactivityReminder: null });
         }
         // Une réponse antérieure au dernier contrôle annule l'ancien rappel. En
         // envoyer un nouveau au lieu de supprimer immédiatement le salon.

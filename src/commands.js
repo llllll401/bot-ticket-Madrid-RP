@@ -1,6 +1,8 @@
 import { PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
 import { TICKET_TYPES } from './catalog.js';
 
+export const AUTOMATIC_DELETION_CONTROL_USER_ID = '1239641924407660604';
+
 export const commands = [
   new SlashCommandBuilder()
     .setName('panneau-tickets')
@@ -15,6 +17,13 @@ export const commands = [
   new SlashCommandBuilder()
     .setName('ticket-fermer')
     .setDescription('Fermer le ticket actuel et supprimer son salon après confirmation.'),
+  new SlashCommandBuilder()
+    .setName('suppression-automatique')
+    .setDescription('Activer ou désactiver la suppression automatique des tickets inactifs.')
+    .addBooleanOption((option) => option
+      .setName('activer')
+      .setDescription('Désactivez pour envoyer des rappels répétés à la place des suppressions.')
+      .setRequired(true)),
   new SlashCommandBuilder()
     .setName('tickets')
     .setDescription('Consulter les tickets accessibles à votre équipe.')

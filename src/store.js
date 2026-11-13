@@ -92,6 +92,7 @@ function validTicket(ticket, channelId, guildId) {
 function validateData(data, guildId) {
   if (!data || data.version !== 1 || !isId(data.guildId)
     || !Number.isSafeInteger(data.nextNumber) || data.nextNumber < 1
+    || (data.automaticDeletionEnabled != null && typeof data.automaticDeletionEnabled !== 'boolean')
     || !data.tickets || typeof data.tickets !== 'object' || Array.isArray(data.tickets)) {
     throw new Error('Format du fichier de tickets invalide.');
   }
@@ -132,7 +133,7 @@ export class TicketStore {
         throw new Error(`Impossible de lire ${file} : ${error.message}`, { cause: error });
       }
     } else {
-      this.#data = { version: 1, guildId, nextNumber: 1, tickets: {} };
+      this.#data = { version: 1, guildId, nextNumber: 1, automaticDeletionEnabled: true, tickets: {} };
       this.#persist(this.#data);
     }
   }
@@ -158,6 +159,21 @@ export class TicketStore {
     const number = this.#data.nextNumber;
     this.#commit({ ...this.#data, nextNumber: number + 1 });
     return number;
+  }
+
+  isAutomaticDeletionEnabled() {
+    // Les anciens registres n’avaient pas ce réglage : ils conservent le
+    // comportement historique (suppression automatique activée).
+    return this.#data.automaticDeletionEnabled !== false;
+  }
+
+  setAutomaticDeletionEnabled(enabled) {
+    if (typeof enabled !== 'boolean') throw new Error('Le réglage de suppression automatique doit être booléen.');
+    // Écrire aussi « true » pour une ancienne donnée qui ne contenait pas
+    // encore le réglage, dès qu’un utilisateur le confirme explicitement.
+    if (this.#data.automaticDeletionEnabled === enabled) return enabled;
+    this.#commit({ ...this.#data, automaticDeletionEnabled: enabled });
+    return enabled;
   }
 
   get(channelId) {
