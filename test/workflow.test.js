@@ -16,6 +16,7 @@ const OTHER_GUILD = '100000000000000002';
 const OWNER = '110000000000000001';
 const STRANGER = '110000000000000002';
 const STAFF = '110000000000000003';
+const AUTOMATIC_DELETION_CONTROL_USER = '1239641924407660604';
 const BOT = '110000000000000004';
 const ROLE = '200000000000000001';
 const SPECIAL_ROLE = '200000000000000002';
@@ -198,6 +199,7 @@ function interaction(guild, options = {}) {
     customId: options.customId,
     commandName: options.commandName,
     values: options.values,
+    options: { getBoolean: (name) => name === 'activer' ? (options.deletionEnabled ?? null) : null },
     fields: { getTextInputValue: () => options.detail },
     deferred: false,
     replied: false,
@@ -315,6 +317,32 @@ test('serveur unique et installation du panneau protégée', async (t) => {
   await h.handle(allowed);
   assert.match(allowed.response.content, /installé/);
   assert.equal(panelChannel.sent[0].payload.components[0].toJSON().components[0].options.length, 6);
+});
+
+test('la commande de suppression automatique est strictement réservée et persistante', async (t) => {
+  const h = harness(t);
+  const denied = interaction(h.guild, {
+    kind: 'command', commandName: 'suppression-automatique', userId: STAFF, deletionEnabled: false,
+  });
+  await h.handle(denied);
+  assert.match(denied.response.content, /réservée/);
+  assert.equal(h.store.isAutomaticDeletionEnabled(), true);
+
+  const disabled = interaction(h.guild, {
+    kind: 'command', commandName: 'suppression-automatique', userId: AUTOMATIC_DELETION_CONTROL_USER, deletionEnabled: false,
+  });
+  await h.handle(disabled);
+  assert.equal(disabled.response.flags, MessageFlags.Ephemeral);
+  assert.match(disabled.response.content, /désactivée.*nouveau rappel/);
+  assert.equal(h.store.isAutomaticDeletionEnabled(), false);
+  assert.equal(new TicketStore(h.config.dataFile, GUILD).isAutomaticDeletionEnabled(), false);
+
+  const enabled = interaction(h.guild, {
+    kind: 'command', commandName: 'suppression-automatique', userId: AUTOMATIC_DELETION_CONTROL_USER, deletionEnabled: true,
+  });
+  await h.handle(enabled);
+  assert.match(enabled.response.content, /réactivée/);
+  assert.equal(h.store.isAutomaticDeletionEnabled(), true);
 });
 
 test('les ouvertures simultanées ne créent qu’un salon privé par utilisateur et par type', async (t) => {

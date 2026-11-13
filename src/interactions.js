@@ -1,4 +1,5 @@
 import { ChannelType, MessageFlags, PermissionFlagsBits, escapeMarkdown } from 'discord.js';
+import { AUTOMATIC_DELETION_CONTROL_USER_ID } from './commands.js';
 import { statusLabel, TYPE_BY_KEY } from './catalog.js';
 import { UserError } from './errors.js';
 import { KeyedLock } from './lock.js';
@@ -304,6 +305,17 @@ export function createInteractionHandler({ config, service, logger = console }) 
           await interaction.deferReply(ephemeral);
           await interaction.channel.send(publicPanel());
           await interaction.editReply({ content: '✅ Panneau de tickets installé dans ce salon.' });
+        } else if (interaction.commandName === 'suppression-automatique') {
+          if (interaction.user.id !== AUTOMATIC_DELETION_CONTROL_USER_ID) {
+            throw new UserError('Cette commande est réservée à son utilisateur autorisé.');
+          }
+          const enabled = interaction.options.getBoolean('activer', true);
+          if (typeof enabled !== 'boolean') throw new UserError('Choisissez si la suppression automatique doit être activée.');
+          service.store.setAutomaticDeletionEnabled(enabled);
+          const content = enabled
+            ? '✅ Suppression automatique réactivée : un ticket inactif sera supprimé après le rappel et son délai.'
+            : '✅ Suppression automatique désactivée : à la place, le bot enverra un nouveau rappel à chaque échéance d’inactivité.';
+          await interaction.reply({ content, ...ephemeral });
         } else if (interaction.commandName === 'ticket-panneau') {
           const ticket = service.requireTicket(interaction.channelId);
           ensureStaff(interaction, ticket, config);

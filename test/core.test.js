@@ -142,7 +142,10 @@ test('les permissions du salon excluent @everyone et distinguent rôles et membr
 test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   assert.equal(commands[0].toJSON().name, 'panneau-tickets');
   assert.equal(commands[0].toJSON().default_member_permissions, PermissionFlagsBits.ManageGuild.toString());
-  assert.deepEqual(commands.map((command) => command.toJSON().name), ['panneau-tickets', 'ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'tickets']);
+  assert.deepEqual(commands.map((command) => command.toJSON().name), ['panneau-tickets', 'ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'suppression-automatique', 'tickets']);
+  const automaticDeletion = commands.find((command) => command.toJSON().name === 'suppression-automatique').toJSON();
+  assert.equal(automaticDeletion.options[0].name, 'activer');
+  assert.equal(automaticDeletion.options[0].required, true);
   const overview = commands.find((command) => command.toJSON().name === 'tickets').toJSON();
   assert.deepEqual(overview.options.map((option) => option.name), ['statut', 'categorie', 'responsable', 'mes_tickets', 'sans_responsable', 'priorite']);
   const button = (panel, id) => panel.components.flatMap((row) => row.toJSON().components).find((item) => item.custom_id === id);
@@ -180,12 +183,22 @@ test('le registre persiste, protège ses copies et ne mélange pas les serveurs'
   const dir = tempDir(t);
   const file = path.join(dir, 'nested', 'tickets.json');
   const store = new TicketStore(file, GUILD);
+  assert.equal(store.isAutomaticDeletionEnabled(), true);
   assert.equal(store.allocateNumber(), 1);
   store.save(record());
   const copy = store.get(CHANNEL);
   copy.status = 'closed';
   assert.equal(store.get(CHANNEL).status, 'waiting');
+  // Un registre écrit avant ce réglage garde le comportement historique.
+  const legacyData = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete legacyData.automaticDeletionEnabled;
+  fs.writeFileSync(file, JSON.stringify(legacyData));
+  assert.equal(new TicketStore(file, GUILD).isAutomaticDeletionEnabled(), true);
+  assert.equal(store.setAutomaticDeletionEnabled(false), false);
   const reloaded = new TicketStore(file, GUILD);
+  assert.equal(reloaded.isAutomaticDeletionEnabled(), false);
+  assert.equal(reloaded.setAutomaticDeletionEnabled(true), true);
+  assert.equal(new TicketStore(file, GUILD).isAutomaticDeletionEnabled(), true);
   assert.equal(reloaded.findOpen(OWNER, 'plainte').channelId, CHANNEL);
   assert.equal(reloaded.allocateNumber(), 2);
   reloaded.markDeleted(CHANNEL);
@@ -273,7 +286,7 @@ test('l’enregistrement des commandes ne supprime pas les autres commandes du b
   } };
   await registerGuildCommands(guild, commands);
   assert.deepEqual(edited, [['1', 'panneau-tickets']]);
-  assert.deepEqual(created, ['ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'tickets']);
+  assert.deepEqual(created, ['ticket-panneau', 'ticket-prendre', 'ticket-fermer', 'suppression-automatique', 'tickets']);
   assert.equal(existing.get('2').name, 'autre-commande');
 });
 

@@ -180,6 +180,26 @@ test('2 h d’inactivité envoient un rappel, puis 2 h sans message suppriment l
   assert.match(h.channel.deleteReasons[0], /automatique.*inactivité/);
 });
 
+test('la désactivation de la suppression remplace chaque échéance par un nouveau rappel', async (t) => {
+  const h = harness(t);
+  h.store.setAutomaticDeletionEnabled(false);
+  h.clock.now = BASE + WARNING_DELAY;
+  assert.deepEqual(await h.service.checkInactivity(h.guild, CHANNEL), { reminded: true });
+  assert.match(h.channel.sent[0].payload.content, /suppression automatique est désactivée/i);
+  // Quand il n’y a plus de suppression, Gérer les salons ne doit plus être requis
+  // pour transformer l’échéance suivante en rappel.
+  h.channel.bits = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages];
+  h.clock.now += DELETE_DELAY;
+  assert.deepEqual(await h.service.checkInactivity(h.guild, CHANNEL), { reminded: true });
+  assert.equal(h.channel.deleted, undefined);
+  assert.equal(h.channel.sent.length, 2);
+  assert.equal(h.store.get(CHANNEL).inactivityReminder.state, 'sent');
+  h.clock.now += DELETE_DELAY;
+  await h.service.checkInactivity(h.guild, CHANNEL);
+  assert.equal(h.channel.deleted, undefined);
+  assert.equal(h.channel.sent.length, 3);
+});
+
 test('tout message humain du salon remet le délai à zéro, mais pas les bots ni les webhooks', async (t) => {
   const h = harness(t);
   const first = BASE + WARNING_DELAY - 60 * 60 * 1000;
