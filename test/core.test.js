@@ -201,12 +201,29 @@ test('le registre persiste, protège ses copies et ne mélange pas les serveurs'
   assert.equal(new TicketStore(file, GUILD).isAutomaticDeletionEnabled(), true);
   assert.equal(reloaded.findOpen(OWNER, 'plainte').channelId, CHANNEL);
   assert.equal(reloaded.allocateNumber(), 2);
-  reloaded.markDeleted(CHANNEL);
+  reloaded.remove(CHANNEL);
   assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
-  assert.equal(reloaded.get(CHANNEL).status, 'deleted');
+  assert.equal(reloaded.get(CHANNEL), null);
+  assert.equal(new TicketStore(file, GUILD).get(CHANNEL), null);
   assert.throws(() => new TicketStore(file, OTHER_GUILD), /autre serveur/);
   assert.deepEqual(fs.readdirSync(path.dirname(file)), ['tickets.json']);
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test('les anciens tickets déjà supprimés sont retirés du registre au démarrage', (t) => {
+  const file = path.join(tempDir(t), 'tickets.json');
+  const store = new TicketStore(file, GUILD);
+  store.allocateNumber();
+  store.save(record());
+  const legacyData = JSON.parse(fs.readFileSync(file, 'utf8'));
+  legacyData.tickets[CHANNEL] = {
+    ...legacyData.tickets[CHANNEL], status: 'deleted', deletedAt: '2026-01-02T12:00:00.000Z',
+    deletedBy: OWNER, deletionRequestedAt: '2026-01-02T12:00:00.000Z', internalNotes: [],
+  };
+  fs.writeFileSync(file, JSON.stringify(legacyData));
+  const reloaded = new TicketStore(file, GUILD);
+  assert.equal(reloaded.get(CHANNEL), null);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).tickets, {});
 });
 
 test('un registre corrompu bloque le démarrage sans être écrasé', (t) => {
@@ -348,7 +365,7 @@ test('les index suivent fermeture, suppression et réouverture sans céder aprè
   store.save(second);
   assert.throws(() => store.save(first), /déjà ouvert/);
   assert.throws(() => store.save({ ...second, channelId: '500000000000000003', ownerId: '400000000000000003' }), /numéro.*déjà utilisé/);
-  store.markDeleted(second.channelId);
+  store.remove(second.channelId);
   store.save(first);
   assert.equal(store.findOpen(OWNER, 'plainte').channelId, first.channelId);
 

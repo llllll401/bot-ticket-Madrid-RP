@@ -126,7 +126,22 @@ export class TicketStore {
     if (fs.existsSync(file)) {
       try {
         this.#data = JSON.parse(fs.readFileSync(file, 'utf8'));
-        const indexes = validateData(this.#data, guildId);
+        let indexes = validateData(this.#data, guildId);
+        // Les anciennes versions conservaient un historique « deleted ». Une
+        // suppression Discord confirmée ne doit désormais plus laisser de
+        // ticket dans le registre ; nettoyer ces entrées à l'ouverture permet
+        // aussi de migrer les fichiers existants sans toucher aux tickets actifs.
+        const deletedChannelIds = Object.entries(this.#data.tickets)
+          .filter(([, ticket]) => ticket.status === 'deleted')
+          .map(([channelId]) => channelId);
+        if (deletedChannelIds.length) {
+          const tickets = { ...this.#data.tickets };
+          for (const channelId of deletedChannelIds) delete tickets[channelId];
+          const next = { ...this.#data, tickets };
+          this.#persist(next);
+          this.#data = next;
+          indexes = validateData(next, guildId);
+        }
         this.#numbers = indexes.numbers;
         this.#activeSlots = indexes.activeSlots;
       } catch (error) {
@@ -191,7 +206,9 @@ export class TicketStore {
   }
 
   save(ticket) {
-    if (!validTicket(ticket, ticket?.channelId, this.#data.guildId) || ticket.number >= this.#data.nextNumber) {
+    // « deleted » reste accepté à la lecture uniquement pour migrer les
+    // anciens registres ; aucun nouveau tombstone ne doit être enregistré.
+    if (ticket?.status === 'deleted' || !validTicket(ticket, ticket?.channelId, this.#data.guildId) || ticket.number >= this.#data.nextNumber) {
       throw new Error('Impossible d’enregistrer un ticket invalide.');
     }
     const previous = this.#data.tickets[ticket.channelId];
@@ -226,20 +243,18 @@ export class TicketStore {
     return structuredClone(ticket);
   }
 
-  markDeleted(channelId) {
+  remove(channelId) {
     const ticket = this.get(channelId);
-    if (!ticket || ticket.status === 'deleted') return ticket;
-    const timestamp = new Date().toISOString();
-    return this.save({
-      ...ticket, status: 'deleted', deletedAt: timestamp, updatedAt: timestamp,
-      closedAt: ticket.closedAt ?? ticket.pendingDeletion?.requestedAt ?? null,
-      closedBy: ticket.closedBy ?? (ticket.status === 'closed' ? null : (ticket.pendingDeletion?.actorId ?? null)),
-      deletedBy: ticket.pendingDeletion?.actorId ?? null,
-      deletionRequestedAt: ticket.pendingDeletion?.requestedAt ?? null,
-      // Les notes internes ne sont pas une transcription et ne survivent pas à
-      // la suppression du ticket (les sauvegardes externes restent à gérer).
-      internalNotes: [], pendingReclassification: null, inactivityReminder: null,
-      pendingDeletion: null, pendingTransition: null, renamePending: false,
-    });
+    if (!ticket) return null;
+    const tickets = { ...this.#data.tickets };
+    delete tickets[channelId];
+    this.#commit({ ...this.#data, tickets });
+    // Les index ne changent qu'après l'écriture atomique réussie : un échec de
+    // disque conserve donc le journal de suppression pour une reprise sûre.
+    for (const key of activeSlotsForTicket(ticket)) {
+      if (this.#activeSlots.get(key) === channelId) this.#activeSlots.delete(key);
+    }
+    this.#numbers.delete(ticket.number);
+    return ticket;
   }
 }
