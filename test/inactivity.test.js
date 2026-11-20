@@ -171,11 +171,8 @@ test('2 h d’inactivité envoient un rappel, puis 2 h sans message suppriment l
   assert.equal(h.channel.deleted, undefined);
   h.clock.now++;
   assert.deepEqual(await h.service.checkInactivity(h.guild, CHANNEL), { deleted: true });
-  const deleted = h.store.get(CHANNEL);
-  assert.equal(deleted.status, 'deleted');
-  assert.equal(deleted.deletedBy, BOT);
-  assert.deepEqual(deleted.internalNotes, []);
-  assert.equal(deleted.inactivityReminder, null);
+  assert.equal(h.store.get(CHANNEL), null);
+  assert.equal(new TicketStore(h.config.dataFile, GUILD).get(CHANNEL), null);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
   assert.match(h.channel.deleteReasons[0], /automatique.*inactivité/);
 });
@@ -256,7 +253,7 @@ test('les messages reçus hors ligne sont vérifiés avant rappel et avant suppr
   assert.equal(h.channel.sent.length, 2);
   h.clock.now += DELETE_DELAY;
   await restarted.checkInactivity(h.guild, CHANNEL);
-  assert.equal(afterRestart.get(CHANNEL).status, 'deleted');
+  assert.equal(afterRestart.get(CHANNEL), null);
 });
 
 test('un arrêt prolongé avant le premier rappel ne ferme jamais le salon sans avertissement', async (t) => {
@@ -577,19 +574,17 @@ test('une suppression Discord confirmée puis interrompue sur disque est finalis
   h.clock.now = BASE + WARNING_DELAY;
   await h.service.checkInactivity(h.guild, CHANNEL);
   h.clock.now += DELETE_DELAY;
-  const markDeleted = h.store.markDeleted.bind(h.store);
-  h.store.markDeleted = () => { throw new Error('écriture impossible'); };
+  const remove = h.store.remove.bind(h.store);
+  h.store.remove = () => { throw new Error('écriture impossible'); };
   await assert.rejects(h.service.checkInactivity(h.guild, CHANNEL), /écriture impossible/);
   assert.equal(h.channel.deleted, true);
   assert.equal(h.store.get(CHANNEL).pendingDeletion.actorId, BOT);
-  h.store.markDeleted = markDeleted;
+  h.store.remove = remove;
   h.service.stop();
   const reloaded = new TicketStore(h.config.dataFile, GUILD);
   const service = h.makeService(reloaded);
   await service.recoverPendingDeletions(h.guild);
-  assert.equal(reloaded.get(CHANNEL).status, 'deleted');
-  assert.equal(reloaded.get(CHANNEL).deletedBy, BOT);
-  assert.deepEqual(reloaded.get(CHANNEL).internalNotes, []);
+  assert.equal(reloaded.get(CHANNEL), null);
 });
 
 test('le moniteur ignore les tickets non dus et continue après l’erreur d’un salon', async () => {

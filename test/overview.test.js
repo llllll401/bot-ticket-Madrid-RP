@@ -131,7 +131,6 @@ test('la vue filtre les rôles par catégorie et les permissions effectives, y c
   const denied = ticket(2);
   const sensitive = ticket(3, { type: 'rc_staff' });
   const missing = ticket(4, { type: 'question' });
-  const deleted = ticket(5, { status: 'deleted' });
   const closed = ticket(6, { status: 'closed' });
   // Un accès manuel au salon ne remplace pas le rôle autorisé pour le type.
   h.add(visible, { extraRoles: [SPECIAL] });
@@ -139,7 +138,6 @@ test('la vue filtre les rôles par catégorie et les permissions effectives, y c
   // Même si un rôle général a accès au salon, il ne gère pas le type RC STAFF.
   h.add(sensitive, { extraRoles: [ROLE] });
   h.add(missing, { missing: true });
-  h.add(deleted);
   h.add(closed);
 
   const staff = await runCommand(h);
@@ -148,7 +146,7 @@ test('la vue filtre les rôles par catégorie et les permissions effectives, y c
   assert.deepEqual(mentionedChannels(staff), [visible.channelId]);
   assert.match(description(staff), /🔴 1 · 🟠 0 · 🟡 0 · 🟢 0 · ⚫ 1/);
   assert.match(description(staff), /Résultats :\*\* 1/);
-  for (const secret of [denied, sensitive, missing, deleted, closed]) assert.ok(!description(staff).includes(secret.channelId));
+  for (const secret of [denied, sensitive, missing, closed]) assert.ok(!description(staff).includes(secret.channelId));
   assert.deepEqual(staff.response.allowedMentions, { parse: [] });
 
   const restricted = await runCommand(h, { options: { statut: 'all', categorie: 'rc_staff' } });

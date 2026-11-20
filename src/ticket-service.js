@@ -50,7 +50,7 @@ export class TicketService {
       channel = null;
     }
     if (!channel) {
-      this.store.markDeleted(ticket.channelId);
+      this.store.remove(ticket.channelId);
       this.pendingActivity.delete(ticket.channelId);
       this.names.cancel(ticket.channelId);
       return null;
@@ -653,7 +653,7 @@ export class TicketService {
     }
     // Un éventuel événement ChannelDelete est sérialisé par le même verrou.
     try {
-      return { ticket: this.store.markDeleted(ticket.channelId) };
+      return { ticket: this.store.remove(ticket.channelId) };
     } finally {
       // Même en cas d'échec disque, Discord a confirmé la disparition du salon.
       this.pendingActivity.delete(ticket.channelId);
@@ -712,7 +712,7 @@ export class TicketService {
     this.names.cancel(channel.id);
     const ticket = this.store.get(channel.id);
     if (!ticket || ticket.status === 'deleted') return;
-    await this.locks.run(slot(ticket.ownerId), () => this.store.markDeleted(channel.id));
+    await this.locks.run(slot(ticket.ownerId), () => this.store.remove(channel.id));
   }
 
   async recoverPendingDeletions(guild) {

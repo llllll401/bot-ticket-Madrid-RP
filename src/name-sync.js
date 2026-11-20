@@ -71,7 +71,7 @@ export class ChannelNameSynchronizer {
   async #markMissing(job) {
     await this.locks.run(job.key, () => {
       if (job.cancelled) return;
-      this.store.markDeleted(job.channelId);
+      this.store.remove(job.channelId);
       this.cancel(job.channelId);
     });
   }

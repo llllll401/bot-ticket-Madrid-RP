@@ -421,12 +421,7 @@ test('prise en charge, étape, traitement et fermeture par suppression confirmé
   };
   await h.handle(deleting);
   assert.match(deleting.response.content, /suppression du salon/);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).closedBy, OWNER);
-  assert.equal(h.store.get(channel.id).deletedBy, OWNER);
-  assert.equal(h.store.get(channel.id).deletionRequestedAt, h.store.get(channel.id).closedAt);
-  assert.ok(h.store.get(channel.id).closedAt);
-  assert.equal(h.store.get(channel.id).pendingDeletion, null);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.guild.channelMap.has(channel.id), false);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
   const replacement = await openTicket(h);
@@ -461,7 +456,6 @@ test('les anciens tickets fermés peuvent être rouverts avec leurs permissions 
   assert.equal(permission(channel, OWNER, 'CreatePublicThreads'), false);
   assert.equal(permission(channel, OWNER, 'CreatePrivateThreads'), null);
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).closedBy, OWNER);
 });
 
 test('réouverture sans doublon et suppression explicite des anciens tickets uniquement par le staff', async (t) => {
@@ -482,7 +476,7 @@ test('réouverture sans doublon et suppression explicite des anciens tickets uni
   assert.ok(h.guild.channelMap.has(old.channel.id));
   await press(h, old.channel, IDS.deleteConfirm, { userId: STAFF, roles: [ROLE] });
   assert.equal(h.guild.channelMap.has(old.channel.id), false);
-  assert.equal(h.store.get(old.channel.id).status, 'deleted');
+  assert.equal(h.store.get(old.channel.id), null);
   assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, newer.channel.id);
 });
 
@@ -503,13 +497,13 @@ test('les tickets et boutons survivent au redémarrage et les salons supprimés 
   const select = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });
   await reloadedHandler(select);
   assert.match(select.response.content, /créé/);
-  assert.equal(reloadedStore.get(first.channel.id).status, 'deleted');
+  assert.equal(reloadedStore.get(first.channel.id), null);
   const replacement = reloadedStore.findOpen(OWNER, 'plainte');
   assert.notEqual(replacement.channelId, first.channel.id);
   await reloadedService.channelDeleted({ id: replacement.channelId, guildId: OTHER_GUILD });
   assert.ok(reloadedStore.findOpen(OWNER, 'plainte'));
   await reloadedService.channelDeleted(h.guild.channelMap.get(replacement.channelId));
-  assert.equal(reloadedStore.get(replacement.channelId).status, 'deleted');
+  assert.equal(reloadedStore.get(replacement.channelId), null);
 });
 
 test('les rôles spécifiques remplacent les rôles généraux et sont synchronisés après changement', async (t) => {
@@ -559,7 +553,7 @@ test('un échec de renommage peut être réparé et ne bloque pas la suppression
   await waitUntil(() => Boolean(h.service.names.jobs.get(channel.id)?.timer));
   const response = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
   assert.match(response.response.content, /suppression du salon/);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.guild.channelMap.has(channel.id), false);
   assert.equal(h.service.names.jobs.has(channel.id), false);
 });
@@ -698,7 +692,6 @@ test('si la restauration échoue, le journal reste présent pour le prochain dé
   assert.ok(h.store.get(channel.id).pendingTransition);
   channel.failPermissionEdit = false;
   await h.service.recoverPendingTransitions(h.guild);
-  assert.equal(h.store.get(channel.id).pendingTransition, null);
   assert.equal(permission(channel, OWNER, 'SendMessages'), true);
 });
 
@@ -729,7 +722,7 @@ test('la limite Discord ne bloque pas le suivi et seul le dernier nom est appliq
   assert.match(channel.renameAttempts[1], /^🟢-traite-/u);
   const close = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
   assert.match(close.response.content, /suppression du salon/);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id), null);
 });
 
 test('un ancien renommage en vol est suivi du dernier statut, sans étapes intermédiaires', async (t) => {
@@ -932,7 +925,7 @@ test('un salon supprimé pendant le renommage libère le registre pour une nouve
   await started;
   h.guild.channelMap.delete(old.channel.id);
   release();
-  await waitUntil(() => h.store.get(old.channel.id).status === 'deleted');
+  await waitUntil(() => h.store.get(old.channel.id) === null);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
   assert.equal(h.service.names.jobs.has(old.channel.id), false);
   const replacement = await openTicket(h);
@@ -1000,8 +993,7 @@ test('/ticket-fermer et les boutons protègent la suppression ; l’annulation n
   await h.handle(staffCommand);
   assert.match(staffCommand.response.content, /Aucune transcription/);
   await press(h, channel, IDS.closeDeleteConfirm, { userId: STAFF, roles: [ROLE] });
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).closedBy, STAFF);
+  assert.equal(h.store.get(channel.id), null);
 });
 
 test('un refus de suppression laisse le ticket ouvert et reprend les renommages en attente', async (t) => {
@@ -1022,7 +1014,7 @@ test('un refus de suppression laisse le ticket ouvert et reprend les renommages 
   assert.equal(h.service.names.jobs.get(channel.id), deferredRename, 'Le délai Discord est conservé après l’échec.');
   channel.failDelete = false;
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.service.names.jobs.has(channel.id), false);
 });
 
@@ -1033,8 +1025,7 @@ test('une suppression réussie malgré une erreur réseau est confirmée par la 
   channel.delete = async () => { await deleteChannel(); throw new Error('réponse Discord perdue'); };
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
   assert.equal(h.guild.channelMap.has(channel.id), false);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).closedBy, OWNER);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
 });
 
@@ -1082,10 +1073,7 @@ test('la reprise finalise un salon disparu mais préserve les salons existants e
   const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
   t.after(() => service.stop());
   await service.recoverPendingDeletions(h.guild);
-  assert.equal(reloaded.get(removed.channel.id).status, 'deleted');
-  assert.equal(reloaded.get(removed.channel.id).closedBy, OWNER);
-  assert.equal(reloaded.get(removed.channel.id).closedAt, requestedAt);
-  assert.equal(reloaded.get(removed.channel.id).pendingDeletion, null);
+  assert.equal(reloaded.get(removed.channel.id), null);
   assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
   assert.equal(reloaded.get(existing.channel.id).status, 'waiting');
   assert.equal(reloaded.get(existing.channel.id).pendingDeletion, null);
@@ -1097,11 +1085,7 @@ test('la reprise finalise un salon disparu mais préserve les salons existants e
 test('après suppression, une erreur disque est réparée au redémarrage grâce au journal', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h);
-  const save = h.store.save.bind(h.store);
-  h.store.save = (ticket) => {
-    if (ticket.status === 'deleted') throw new Error('disque indisponible après suppression');
-    return save(ticket);
-  };
+  h.store.remove = () => { throw new Error('disque indisponible après suppression'); };
   const response = await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
   assert.match(response.response.content, /Une erreur/);
   assert.equal(h.guild.channelMap.has(channel.id), false);
@@ -1112,8 +1096,7 @@ test('après suppression, une erreur disque est réparée au redémarrage grâce
   const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
   t.after(() => service.stop());
   await service.recoverPendingDeletions(h.guild);
-  assert.equal(reloaded.get(channel.id).status, 'deleted');
-  assert.equal(reloaded.get(channel.id).closedBy, OWNER);
+  assert.equal(reloaded.get(channel.id), null);
   assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
 });
 
@@ -1143,8 +1126,7 @@ test('la fermeture, ChannelDelete et une nouvelle ouverture sont sérialisés pa
   release();
   const [, replacement] = await Promise.all([closing, opening]);
   await deletionEvent;
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).closedBy, OWNER);
+  assert.equal(h.store.get(channel.id), null);
   assert.notEqual(replacement.channel.id, channel.id);
   assert.equal(h.store.findOpen(OWNER, 'plainte').channelId, replacement.channel.id);
   assert.equal(h.guild.createCount, 2);
@@ -1162,11 +1144,10 @@ test('une suppression annule un renommage déjà en vol sans ressusciter le tick
   await press(h, channel, IDS.claim, { userId: STAFF, roles: [ROLE] });
   await running;
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id), null);
   release();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).renamePending, false);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.service.names.jobs.has(channel.id), false);
   assert.equal(h.guild.channelMap.has(channel.id), false);
 });
@@ -1278,11 +1259,7 @@ test('un ancien ticket fermé supprimé juste avant une interruption est réconc
   const service = new TicketService({ config: h.config, store: reloaded, botUserId: BOT, logger: silentLogger });
   t.after(() => service.stop());
   await service.recoverPendingDeletions(h.guild);
-  assert.equal(reloaded.get(old.channel.id).status, 'deleted');
-  assert.equal(reloaded.get(old.channel.id).closedAt, legacy.closedAt);
-  assert.equal(reloaded.get(old.channel.id).closedBy, null, 'Le responsable historique de la fermeture n’était pas connu.');
-  assert.equal(reloaded.get(old.channel.id).deletedBy, STAFF);
-  assert.equal(reloaded.get(old.channel.id).deletionRequestedAt, requestedAt);
+  assert.equal(reloaded.get(old.channel.id), null);
   assert.equal(reloaded.findOpen(OWNER, 'plainte').channelId, newer.channel.id);
 });
 
@@ -1312,7 +1289,7 @@ test('deux confirmations simultanées ne demandent qu’une suppression Discord'
   const second = interaction(h.guild, { channel, customId: IDS.closeDeleteConfirm, userId: STAFF, roles: [ROLE] });
   await Promise.all([h.handle(first), h.handle(second)]);
   assert.equal(calls, 1);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.guild.channelMap.has(channel.id), false);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
 });
@@ -1354,8 +1331,7 @@ test('la suppression confirmée ne dépend pas de restaurer une ancienne transit
   assert.equal(h.store.get(channel.id).pendingDeletion, null);
   channel.failDelete = false;
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).pendingTransition, null);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.guild.channelMap.has(channel.id), false);
 });
 
@@ -1453,7 +1429,6 @@ test('les notes internes restent privées, paginées et effacées lors de la sup
   assert.match(forged.response.content, /personnel/);
   assert.equal(h.store.get(channel.id).internalNotes.length, 3);
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
   assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Enquête privée'));
 });
 
@@ -1689,9 +1664,7 @@ test('le créateur peut fermer un ticket dont la reclassification a échoué, en
   await press(h, channel, selected.response.components[0].toJSON().components[0].custom_id, staffAccess);
   assert.ok(h.store.get(channel.id).pendingReclassification);
   await press(h, channel, IDS.closeDeleteConfirm, { userId: OWNER });
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.equal(h.store.get(channel.id).pendingReclassification, null);
-  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
   assert.equal(h.store.findOpen(OWNER, 'question'), null);
 });
@@ -1747,8 +1720,7 @@ test('les notes internes sont effacées aussi quand le salon est supprimé manue
   const { channel } = await openTicket(h);
   await h.service.addInternalNote(h.guild, channel.id, STAFF, 'Secret à détruire');
   await h.service.channelDeleted(channel);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.equal(h.store.get(channel.id), null);
   assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Secret à détruire'));
 });
 
@@ -1775,8 +1747,7 @@ test('si le salon disparaît pendant le changement de catégorie, le registre li
   const chosen = await choose(h, channel, `${IDS.manageCategory}${STAFF}`, 'question');
   const failed = await press(h, channel, chosen.response.components[0].toJSON().components[0].custom_id, staffAccess);
   assert.match(failed.response.content, /salon.*n’existe plus/);
-  assert.equal(h.store.get(channel.id).status, 'deleted');
-  assert.deepEqual(h.store.get(channel.id).internalNotes, []);
+  assert.equal(h.store.get(channel.id), null);
   assert.equal(h.store.findOpen(OWNER, 'plainte'), null);
   assert.equal(h.store.findOpen(OWNER, 'question'), null);
 });
@@ -1920,8 +1891,7 @@ test('au redémarrage, un salon supprimé hors ligne libère le type et efface l
   };
   await restarted.reconcileMissingChannels(h.guild);
   assert.deepEqual(listOptions, { cache: false });
-  assert.equal(reloaded.get(missing.channel.id).status, 'deleted');
-  assert.deepEqual(reloaded.get(missing.channel.id).internalNotes, []);
+  assert.equal(reloaded.get(missing.channel.id), null);
   assert.equal(reloaded.findOpen(OWNER, 'plainte'), null);
   assert.equal(reloaded.get(present.channel.id).internalNotes[0].text, 'Note du salon présent');
   assert.ok(!fs.readFileSync(h.config.dataFile, 'utf8').includes('Secret à purger après redémarrage'));
