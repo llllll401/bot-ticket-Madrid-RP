@@ -180,7 +180,7 @@ export function ticketPanel(ticket) {
         actions.push(new ButtonBuilder()
           .setCustomId(IDS.rcStaffReview).setLabel('En étude').setEmoji('🔎').setStyle(ButtonStyle.Primary));
       }
-      if (rcStaffWorkflow && ticket.status === 'review') {
+      if (rcStaffWorkflow && ['review', 'oral_accepted', 'oral_refused'].includes(ticket.status)) {
         actions.push(
           new ButtonBuilder()
             .setCustomId(IDS.rcStaffOralAccepted).setLabel('Accepté oral').setEmoji('✅').setStyle(ButtonStyle.Success),
