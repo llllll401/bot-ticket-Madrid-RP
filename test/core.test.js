@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ApplicationCommandType, ChannelType, Collection, DiscordAPIError, PermissionFlagsBits, PermissionOverwrites, PermissionsBitField, RateLimitError, REST } from 'discord.js';
-import { channelName, slugify, statusLabel, TICKET_TYPES } from '../src/catalog.js';
+import { channelName, RC_STAFF_ACCEPTED_ROLE_ID, slugify, statusLabel, TICKET_TYPES } from '../src/catalog.js';
 import { commands } from '../src/commands.js';
 import { loadConfig, loadConfigFile } from '../src/config.js';
 import { isFullCategory, isServerChannelLimit } from '../src/errors.js';
@@ -69,6 +69,9 @@ test('le catalogue et le menu proposent exactement les six catégories demandée
 test('les noms de salons affichent le statut, le type et un numéro stable', () => {
   const ticket = record();
   assert.equal(channelName(ticket), '🔴-attente-plainte-elodie-0001');
+  assert.equal(channelName({ ...ticket, type: 'rc_staff', status: 'form_sent' }), '📝-formulaire-envoye-rc-staff-elodie-0001');
+  assert.equal(channelName({ ...ticket, type: 'rc_staff', status: 'review' }), '🔎-en-etude-rc-staff-elodie-0001');
+  assert.equal(statusLabel({ ...ticket, type: 'rc_staff', status: 'oral_accepted' }), '✅ Accepté oral');
   assert.equal(channelName({ ...ticket, status: 'claimed' }), '🟠-pris-en-charge-plainte-elodie-0001');
   assert.equal(channelName({ ...ticket, status: 'progress', progressDetail: 'Vérification des preuves' }), '🟡-en-cours-de-verification-des-preuves-plainte-elodie-0001');
   assert.equal(channelName({ ...ticket, status: 'resolved' }), '🟢-traite-plainte-elodie-0001');
@@ -170,6 +173,18 @@ test('les commandes et les panneaux sont sérialisables pour Discord', () => {
   const menu = dossierMenu(record(), OWNER);
   const options = menu.components[0].toJSON().components[0].options.map((option) => option.value);
   assert.deepEqual(options, ['claim', 'progress', 'resolve', 'waiting', 'priority', 'note-add', 'note-list']);
+  const rcStaff = ticketPanel({ ...record(), type: 'rc_staff', status: 'form_sent' });
+  assert.equal(rcStaff.embeds[0].toJSON().fields[1].value, '📝 Formulaire envoyé');
+  assert.equal(button(rcStaff, IDS.rcStaffReview).label, 'En étude');
+  assert.equal(button(rcStaff, IDS.rcStaffOralAccepted), undefined);
+  assert.equal(rcStaff.components.flatMap((row) => row.toJSON().components)
+    .some((item) => item.custom_id.startsWith(IDS.assignmentToggle)), false);
+  const rcStaffMenu = dossierMenu({ ...record(), type: 'rc_staff', status: 'review' }, OWNER);
+  assert.deepEqual(rcStaffMenu.components[0].toJSON().components[0].options.map((option) => option.value), ['claim', 'progress', 'resolve', 'waiting', 'priority', 'note-add', 'note-list']);
+  const review = ticketPanel({ ...record(), type: 'rc_staff', status: 'review' });
+  assert.equal(button(review, IDS.rcStaffReview), undefined);
+  assert.equal(button(review, IDS.rcStaffOralAccepted).label, 'Accepté oral');
+  assert.equal(button(review, IDS.rcStaffOralRefused).label, 'Refusé oral');
   const closed = ticketPanel({ ...record(), status: 'closed' });
   assert.equal(closed.components[0].toJSON().components.some((item) => item.custom_id.startsWith(IDS.assignmentToggle)), false);
   assert.equal(button(closed, IDS.claim), undefined);
@@ -257,6 +272,7 @@ test('le registre refuse les doublons actifs et les états altérés', (t) => {
   store.allocateNumber();
   assert.throws(() => store.save({ ...record(2), channelId: '500000000000000002' }), /déjà ouvert/);
   const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.throws(() => store.save({ ...record(), status: 'form_sent' }), /ticket invalide/);
   persisted.tickets[CHANNEL].status = 'toString';
   fs.writeFileSync(file, JSON.stringify(persisted));
   assert.throws(() => new TicketStore(file, GUILD), /tickets invalides/);
@@ -269,7 +285,7 @@ test('les vérifications de serveur détectent les rôles, catégories et permis
   const fake = {
     id: GUILD,
     members: { fetchMe: async () => ({ permissions: new PermissionsBitField(Object.values(REQUIRED_BOT_PERMISSIONS)) }) },
-    roles: { fetch: async (id) => id === ROLE ? { id } : null },
+    roles: { fetch: async (id) => [ROLE, RC_STAFF_ACCEPTED_ROLE_ID].includes(id) ? { id } : null },
     channels: { fetch: async (id) => { checkedCategories.push(id); return { id, guildId: GUILD, type: ChannelType.GuildCategory }; } },
   };
   await assert.doesNotReject(validateGuildConfiguration(fake, config));
@@ -282,6 +298,8 @@ test('les vérifications de serveur détectent les rôles, catégories et permis
   fake.members.fetchMe = async () => ({ permissions: new PermissionsBitField(Object.values(REQUIRED_BOT_PERMISSIONS)) });
   fake.roles.fetch = async () => null;
   await assert.rejects(validateGuildConfiguration(fake, config), /Rôle staff introuvable/);
+  fake.roles.fetch = async (id) => id === ROLE ? { id } : null;
+  await assert.rejects(validateGuildConfiguration(fake, config), /Rôle RC STAFF à attribuer introuvable/);
   fake.roles.fetch = async (id) => ({ id });
   fake.channels.fetch = async () => ({ guildId: GUILD, type: ChannelType.GuildText });
   await assert.rejects(validateGuildConfiguration(fake, config), /n’est pas une catégorie/);
