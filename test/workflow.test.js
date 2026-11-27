@@ -345,6 +345,26 @@ test('la commande de suppression automatique est strictement réservée et persi
   assert.equal(h.store.isAutomaticDeletionEnabled(), true);
 });
 
+test('un ticket RC STAFF envoie le bonjour puis le formulaire dans deux messages normaux', async (t) => {
+  const h = harness(t);
+  const { channel } = await openTicket(h, 'rc_staff');
+  assert.equal(channel.sent.length, 3);
+  const [greeting, form, panel] = channel.sent.map((message) => message.payload);
+  assert.deepEqual(greeting, {
+    content: `Bonjour <@${OWNER}> !`,
+    allowedMentions: { parse: [], users: [OWNER] },
+  });
+  assert.equal(form.embeds, undefined);
+  assert.equal(form.components, undefined);
+  assert.deepEqual(form.allowedMentions, { parse: [] });
+  assert.match(form.content, /^🛡️・𝐅𝐎𝐑𝐌𝐔𝐋𝐀𝐈𝐑𝐄 𝐑𝐂 𝐒𝐓𝐀𝐅𝐅 — 𝐑𝐄𝐍𝐍𝐄𝐒 𝐑𝐏$/m);
+  assert.match(form.content, /1\. Âge \?\n\n2\. Ancienneté sur Rennes RP \?/);
+  assert.match(form.content, /23\. Es-tu capable de travailler en équipe \?/);
+  assert.match(form.content, /👑 Bonne chance à tous ! Un entretien vocal pourra être organisé après la sélection\.$/);
+  assert.ok(form.content.length <= 2_000);
+  assert.ok(panel.embeds?.length, 'Le panneau de gestion habituel reste envoyé après le formulaire.');
+});
+
 test('les ouvertures simultanées ne créent qu’un salon privé par utilisateur et par type', async (t) => {
   const h = harness(t);
   const first = interaction(h.guild, { kind: 'select', customId: IDS.open, values: ['plainte'] });

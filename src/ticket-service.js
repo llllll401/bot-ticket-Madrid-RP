@@ -7,7 +7,7 @@ import { inactivityDueAt, latestHumanMessageSince } from './inactivity.js';
 import { KeyedLock } from './lock.js';
 import { ChannelNameSynchronizer } from './name-sync.js';
 import { snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
-import { initialTicketMessage, ticketPanel, TICKET_PANEL_VERSION } from './ui.js';
+import { initialTicketMessage, rcStaffApplicationForm, rcStaffGreeting, ticketPanel, TICKET_PANEL_VERSION } from './ui.js';
 
 // Un verrou par propriétaire protège aussi les déplacements entre deux types.
 const slot = (ownerId) => ownerId;
@@ -153,6 +153,17 @@ export class TicketService {
       }
 
       let warning = '';
+      if (ticket.type === 'rc_staff') {
+        try {
+          // Les deux messages restent volontairement simples et séparés pour
+          // que la personne puisse répondre directement sous le formulaire.
+          await channel.send(rcStaffGreeting(ticket));
+          await channel.send(rcStaffApplicationForm());
+        } catch (error) {
+          this.logger.error('Ticket RC STAFF créé, mais formulaire impossible à envoyer :', error);
+          warning = 'Le ticket est ouvert, mais le formulaire RC STAFF n’a pas pu être envoyé. Prévenez le staff.';
+        }
+      }
       try {
         const message = await channel.send(initialTicketMessage(ticket));
         try {
@@ -161,11 +172,11 @@ export class TicketService {
           this.store.save(ticket);
         } catch (error) {
           this.logger.error('Ticket créé, mais ID du panneau non enregistré :', error);
-          warning = 'Le ticket est ouvert, mais son panneau devra peut-être être réparé avec /ticket-panneau.';
+          warning = warning || 'Le ticket est ouvert, mais son panneau devra peut-être être réparé avec /ticket-panneau.';
         }
       } catch (error) {
         this.logger.error('Ticket créé, mais panneau impossible à envoyer :', error);
-        warning = 'Le ticket est ouvert, mais le panneau n’a pas pu être envoyé. Prévenez le staff : /ticket-panneau permet de le rétablir.';
+        warning = warning || 'Le ticket est ouvert, mais le panneau n’a pas pu être envoyé. Prévenez le staff : /ticket-panneau permet de le rétablir.';
       }
       return { created: true, ticket: this.store.get(channel.id), warning };
     });
