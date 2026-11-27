@@ -21,6 +21,10 @@ Discord ne permet pas de colorer directement le texte des noms de salons : le bo
 
 | Couleur | Statut | Exemple de nom |
 | --- | --- | --- |
+| 📝 | Formulaire envoyé (RC STAFF) | `📝-formulaire-envoye-rc-staff-joueur-0001` |
+| 🔎 | En étude (RC STAFF) | `🔎-en-etude-rc-staff-joueur-0001` |
+| ✅ | Accepté oral (RC STAFF) | `✅-accepte-oral-rc-staff-joueur-0001` |
+| ❌ | Refusé oral (RC STAFF) | `❌-refuse-oral-rc-staff-joueur-0001` |
 | 🔴 | En attente | `🔴-attente-plainte-joueur-0001` |
 | 🟠 | Pris en charge | `🟠-pris-en-charge-plainte-joueur-0001` |
 | 🟡 | En cours de… | `🟡-en-cours-de-verification-plainte-joueur-0001` |
@@ -28,6 +32,8 @@ Discord ne permet pas de colorer directement le texte des noms de salons : le bo
 | ⚫ | Ancien ticket fermé avant la mise à jour | `⚫-ferme-plainte-joueur-0001` |
 
 Les nouvelles fermetures suppriment le salon : elles ne produisent donc pas de nom noir. Le numéro reste identique tout au long du ticket. Pour « En cours de… », un formulaire permet au staff d’indiquer une étape courte (par exemple `vérification` ou `enquête`). Choisissez un libellé non sensible : il apparaît dans le nom du salon.
+
+Les nouveaux tickets **RC STAFF** commencent à « Formulaire envoyé ». Le panneau de gestion est envoyé en premier dans le salon, puis le bonjour et le formulaire sont publiés. Leur parcours dédié est : **En étude**, puis **Accepté oral** ou **Refusé oral**. Lors de l’acceptation orale, le bot ajoute au créateur le rôle Discord `1555654481058865152`. Le rôle doit exister et être placé sous le rôle du bot dans la hiérarchie Discord ; sinon l’acceptation est refusée et le statut reste « En étude ».
 
 **Limite Discord :** les renommages de salons sont limités et peuvent être retardés plusieurs minutes. Pour ne pas bloquer le traitement, les boutons et les permissions sont mis à jour immédiatement, tandis que le nom est synchronisé en arrière-plan avec le dernier statut. Pendant ce délai, le nom peut donc afficher l’ancien statut : le panneau du ticket indique alors `⏳` et reste la référence à jour. Laissez le bot en ligne ; il retente automatiquement et reprend les renommages en attente après un redémarrage. Voir les [limites de l’API Discord](https://docs.discord.com/developers/topics/rate-limits).
 
@@ -117,11 +123,12 @@ Un menu public avec les six types apparaît. Le salon du panneau doit être visi
 
 ## Utilisation au quotidien
 
-1. Le membre choisit un type dans le menu et décrit sa demande dans le salon créé. Le bot mentionne les rôles concernés ; pour qu’une mention de rôle déclenche une notification, le rôle doit être mentionnable ou les réglages Discord doivent l’autoriser.
-2. Le staff autorisé peut cliquer directement sur **Prendre en charge / laisser** : le ticket lui est attribué, ou remis en attente s’il en est déjà responsable. Laisser le ticket efface aussi l’étape « En cours de… ». Le bouton ne ferme ni ne supprime le salon. Si un autre membre du staff est responsable, une confirmation privée permet de reprendre le ticket. Si l’attribution a changé depuis l’affichage, utilisez le bouton actualisé.
-3. **Changer la catégorie** et **Contacter un rôle** sont disponibles directement sous l’embed du ticket. **Gérer le dossier** reste disponible : son menu privé regroupe les actions de statut, priorité et notes internes. Si le ticket a déjà un autre responsable, une confirmation privée est demandée avant de le reprendre ; si la responsabilité a changé entre-temps, il faut recommencer. **En cours de…** précise l’étape et **Marquer traité** passe le ticket au vert ; sans responsable, ces actions l’attribuent à la personne qui les utilise. **Remettre en attente** enlève le responsable et l’étape. La priorité urgente ou normale apparaît sur le panneau du salon, visible par le créateur, et dans `/tickets`, sans changer l’ancienneté. `/ticket-prendre` reste disponible, mais n’est pas nécessaire.
-4. Le bouton staff **Rappeler le membre** mentionne le créateur dans le ticket pour lui demander de répondre. Ce rappel manuel ne modifie pas les délais d’inactivité.
-5. Le créateur ou le staff peut cliquer sur **Fermer** ou lancer **`/ticket-fermer`** dans le salon, puis confirmer. Cela **supprime définitivement le salon et tous ses messages**, sans transcription automatique ; le ticket ne peut pas être rouvert. Les notes internes du registre sont également effacées. Le membre peut ensuite ouvrir un nouveau ticket du même type. **Marquer traité ne ferme pas immédiatement** : le ticket reste ouvert jusqu’à une fermeture manuelle ou automatique pour inactivité.
+1. Le membre choisit un type dans le menu et décrit sa demande dans le salon créé. Le bot mentionne les rôles concernés ; pour qu’une mention de rôle déclenche une notification, le rôle doit être mentionnable ou les réglages Discord doivent l’autoriser. Pour un nouveau ticket **RC STAFF**, le panneau de gestion est envoyé en premier, puis le bonjour et le formulaire ; le suivi commence à **Formulaire envoyé**.
+2. Dans un ticket **RC STAFF** au statut « Formulaire envoyé », le staff autorisé clique sur **En étude**. Le panneau propose alors **Accepté oral** et **Refusé oral**. L’acceptation ajoute le rôle `1555654481058865152` au créateur avant d’enregistrer la décision ; si Discord refuse l’attribution, aucune acceptation n’est enregistrée. Les boutons RC STAFF constituent le parcours dédié ; les notes internes, la priorité, les rappels, le changement de catégorie et la fermeture restent disponibles.
+3. Le staff autorisé peut cliquer directement sur **Prendre en charge / laisser** : le ticket lui est attribué, ou remis en attente s’il en est déjà responsable. Laisser le ticket efface aussi l’étape « En cours de… ». Le bouton ne ferme ni ne supprime le salon. Si un autre membre du staff est responsable, une confirmation privée permet de reprendre le ticket. Si l’attribution a changé depuis l’affichage, utilisez le bouton actualisé.
+4. **Changer la catégorie** et **Contacter un rôle** sont disponibles directement sous l’embed du ticket. **Gérer le dossier** reste disponible : son menu privé regroupe les actions de statut, priorité et notes internes. Si le ticket a déjà un autre responsable, une confirmation privée est demandée avant de le reprendre ; si la responsabilité a changé entre-temps, il faut recommencer. **En cours de…** précise l’étape et **Marquer traité** passe le ticket au vert ; sans responsable, ces actions l’attribuent à la personne qui les utilise. **Remettre en attente** enlève le responsable et l’étape. La priorité urgente ou normale apparaît sur le panneau du salon, visible par le créateur, et dans `/tickets`, sans changer l’ancienneté. `/ticket-prendre` reste disponible, mais n’est pas nécessaire.
+5. Le bouton staff **Rappeler le membre** mentionne le créateur dans le ticket pour lui demander de répondre. Ce rappel manuel ne modifie pas les délais d’inactivité.
+6. Le créateur ou le staff peut cliquer sur **Fermer** ou lancer **`/ticket-fermer`** dans le salon, puis confirmer. Cela **supprime définitivement le salon et tous ses messages**, sans transcription automatique ; le ticket ne peut pas être rouvert. Les notes internes du registre sont également effacées. Le membre peut ensuite ouvrir un nouveau ticket du même type. **Marquer traité ne ferme pas immédiatement** : le ticket reste ouvert jusqu’à une fermeture manuelle ou automatique pour inactivité.
 
 ### Rappel et fermeture automatiques
 
@@ -152,7 +159,7 @@ Le staff peut lancer **`/tickets`** depuis un salon où les commandes sont autor
 
 Options disponibles dans la commande :
 
-- `statut` : en attente, pris en charge, en cours, traité, anciens fermés, tous les ouverts ou les ouverts et anciens fermés ;
+- `statut` : formulaires envoyés, en étude, acceptés ou refusés oralement (RC STAFF), en attente, pris en charge, en cours, traité, anciens fermés, tous les ouverts ou les ouverts et anciens fermés ;
 - `categorie` : l’un des six types de tickets ;
 - `responsable` : les tickets attribués à la personne choisie ;
 - `mes_tickets` : uniquement les tickets attribués à la personne qui utilise la commande, et non ceux qu’elle a créés ; ne combinez pas ce filtre avec un responsable différent ;

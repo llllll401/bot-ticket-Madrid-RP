@@ -32,6 +32,10 @@ export const commands = [
       .setDescription('Filtrer par statut (tickets ouverts par défaut).')
       .addChoices(
         { name: 'Tous les tickets ouverts', value: 'active' },
+        { name: '📝 Formulaire envoyé (RC STAFF)', value: 'form_sent' },
+        { name: '🔎 En étude (RC STAFF)', value: 'review' },
+        { name: '✅ Accepté oral (RC STAFF)', value: 'oral_accepted' },
+        { name: '❌ Refusé oral (RC STAFF)', value: 'oral_refused' },
         { name: '🔴 En attente', value: 'waiting' },
         { name: '🟠 Pris en charge', value: 'claimed' },
         { name: '🟡 En cours', value: 'progress' },
