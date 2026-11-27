@@ -8,7 +8,7 @@ import { loadConfig } from '../src/config.js';
 import { createInteractionHandler } from '../src/interactions.js';
 import { closedOwnerWrites, snapshotOwnerWrites } from '../src/permissions.js';
 import { TicketStore } from '../src/store.js';
-import { RC_STAFF_ACCEPTED_ROLE_ID, TicketService } from '../src/ticket-service.js';
+import { TicketService } from '../src/ticket-service.js';
 import { IDS, TICKET_PANEL_VERSION } from '../src/ui.js';
 
 const GUILD = '100000000000000001';
@@ -154,7 +154,7 @@ class FakeChannel {
 
 function makeGuild() {
   const guild = { id: GUILD, channelMap: new Map(), roleMap: new Map(), memberMap: new Map(), createCount: 0 };
-  for (const id of [ROLE, SPECIAL_ROLE, NEW_ROLE, RC_STAFF_ACCEPTED_ROLE_ID]) guild.roleMap.set(id, { id, guild, mentionable: true });
+  for (const id of [ROLE, SPECIAL_ROLE, NEW_ROLE]) guild.roleMap.set(id, { id, guild, mentionable: true });
   guild.roles = { fetch: async (id) => id ? (guild.roleMap.get(id) ?? null) : guild.roleMap };
   guild.members = {
     fetchMe: async () => ({ id: BOT }),
@@ -183,20 +183,11 @@ function interaction(guild, options = {}) {
   const channel = options.channel ?? new FakeChannel(guild, { name: 'accueil' });
   const roles = new Set(options.roles ?? []);
   const userId = options.userId ?? OWNER;
-  const roleCache = new Set(options.freshRoles ?? options.roles ?? []);
-  const member = {
+  guild.memberMap.set(userId, {
     id: userId,
-    roles: {
-      cache: roleCache,
-      add: async (roleId) => {
-        if (member.failRoleAdd) throw new Error('attribution de rôle refusée');
-        roleCache.add(roleId);
-      },
-      remove: async (roleId) => { roleCache.delete(roleId); },
-    },
+    roles: { cache: new Set(options.freshRoles ?? options.roles ?? []) },
     permissions: new PermissionsBitField(options.freshPermissions ?? options.permissions ?? []),
-  };
-  guild.memberMap.set(userId, member);
+  });
   const item = {
     guild,
     guildId: options.guildId ?? guild.id,
@@ -354,12 +345,11 @@ test('la commande de suppression automatique est strictement réservée et persi
   assert.equal(h.store.isAutomaticDeletionEnabled(), true);
 });
 
-test('un ticket RC STAFF envoie le panneau, puis le bonjour et le formulaire dans deux messages normaux', async (t) => {
+test('un ticket RC STAFF envoie le bonjour puis le formulaire dans deux messages normaux', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h, 'rc_staff');
   assert.equal(channel.sent.length, 3);
-  const [panel, greeting, form] = channel.sent.map((message) => message.payload);
-  assert.ok(panel.embeds?.length, 'Le panneau de gestion est envoyé avant le formulaire.');
+  const [greeting, form, panel] = channel.sent.map((message) => message.payload);
   assert.deepEqual(greeting, {
     content: `Bonjour <@${OWNER}> !`,
     allowedMentions: { parse: [], users: [OWNER] },
@@ -372,59 +362,7 @@ test('un ticket RC STAFF envoie le panneau, puis le bonjour et le formulaire dan
   assert.match(form.content, /23\. Es-tu capable de travailler en équipe \?/);
   assert.match(form.content, /👑 Bonne chance à tous ! Un entretien vocal pourra être organisé après la sélection\.$/);
   assert.ok(form.content.length <= 2_000);
-  assert.equal(h.store.get(channel.id).status, 'form_sent');
-  assert.match(channel.name, /^📝-formulaire-envoye-rc-staff-/u);
-  const buttons = panel.components.flatMap((row) => row.toJSON().components);
-  assert.ok(buttons.some((button) => button.custom_id === IDS.rcStaffReview));
-  assert.ok(!buttons.some((button) => button.custom_id === IDS.rcStaffOralAccepted));
-  assert.ok(!buttons.some((button) => button.custom_id === IDS.assignmentToggle));
-});
-
-test('le parcours RC STAFF impose l’étude avant la décision orale et attribue le rôle après acceptation', async (t) => {
-  const h = harness(t);
-  const { channel } = await openTicket(h, 'rc_staff');
-
-  const premature = await press(h, channel, IDS.rcStaffOralAccepted, staffAccess);
-  assert.match(premature.response.content, /En étude/);
-  assert.equal(h.store.get(channel.id).status, 'form_sent');
-  assert.equal(h.guild.memberMap.get(OWNER).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), false);
-
-  const review = await press(h, channel, IDS.rcStaffReview, staffAccess);
-  assert.match(review.response.content, /En étude/);
-  assert.equal(h.store.get(channel.id).status, 'review');
-  await waitForName(h.store, channel);
-  assert.match(channel.name, /^🔎-en-etude-rc-staff-/u);
-  const reviewPanel = channel.messageMap.get(h.store.get(channel.id).panelMessageId).payload;
-  const reviewButtons = reviewPanel.components.flatMap((row) => row.toJSON().components);
-  assert.ok(!reviewButtons.some((button) => button.custom_id === IDS.rcStaffReview));
-  assert.ok(reviewButtons.some((button) => button.custom_id === IDS.rcStaffOralAccepted));
-  assert.ok(reviewButtons.some((button) => button.custom_id === IDS.rcStaffOralRefused));
-
-  const accepted = await press(h, channel, IDS.rcStaffOralAccepted, staffAccess);
-  assert.match(accepted.response.content, /Accepté oral/);
-  assert.match(accepted.response.content, /rôle RC STAFF a été attribué/);
-  assert.equal(h.store.get(channel.id).status, 'oral_accepted');
-  assert.equal(h.guild.memberMap.get(OWNER).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), true);
-  await waitForName(h.store, channel);
-  assert.match(channel.name, /^✅-accepte-oral-rc-staff-/u);
-});
-
-test('un refus oral n’attribue pas le rôle RC STAFF et une erreur d’attribution ne valide pas l’acceptation', async (t) => {
-  const h = harness(t);
-  const refused = await openTicket(h, 'rc_staff');
-  await press(h, refused.channel, IDS.rcStaffReview, staffAccess);
-  await press(h, refused.channel, IDS.rcStaffOralRefused, staffAccess);
-  assert.equal(h.store.get(refused.channel.id).status, 'oral_refused');
-  assert.equal(h.guild.memberMap.get(OWNER).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), false);
-
-  const secondOwner = '110000000000000099';
-  const accepted = await openTicket(h, 'rc_staff', secondOwner);
-  await press(h, accepted.channel, IDS.rcStaffReview, { ...staffAccess, userId: STAFF });
-  h.guild.memberMap.get(secondOwner).failRoleAdd = true;
-  const failed = await press(h, accepted.channel, IDS.rcStaffOralAccepted, staffAccess);
-  assert.match(failed.response.content, /Impossible d’ajouter le rôle RC STAFF/);
-  assert.equal(h.store.get(accepted.channel.id).status, 'review');
-  assert.equal(h.guild.memberMap.get(secondOwner).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), false);
+  assert.ok(panel.embeds?.length, 'Le panneau de gestion habituel reste envoyé après le formulaire.');
 });
 
 test('les ouvertures simultanées ne créent qu’un salon privé par utilisateur et par type', async (t) => {

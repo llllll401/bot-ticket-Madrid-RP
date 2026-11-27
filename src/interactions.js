@@ -144,20 +144,6 @@ export function createInteractionHandler({ config, service, logger = console }) 
       }
       return true;
     }
-    if (button && [IDS.rcStaffReview, IDS.rcStaffOralAccepted, IDS.rcStaffOralRefused].includes(id)) {
-      const ticket = service.requireTicket(interaction.channelId);
-      ensureDossierAccess(interaction, ticket, config);
-      const status = id === IDS.rcStaffReview
-        ? 'review'
-        : (id === IDS.rcStaffOralAccepted ? 'oral_accepted' : 'oral_refused');
-      await interaction.deferReply(ephemeral);
-      const result = await service.setRcStaffStatus(interaction.guild, interaction.channelId, status, interaction.user.id, {
-        expectedCategory: categoryVersion(ticket), authorize: freshDossierAuthorization(interaction, config),
-      });
-      const roleNotice = result.roleGranted ? '\n✅ Le rôle RC STAFF a été attribué au créateur.' : '';
-      await interaction.editReply({ content: `${feedback(result)}${roleNotice}`, allowedMentions: { parse: [] } });
-      return true;
-    }
     if (button && id === IDS.remindOwner) {
       const ticket = service.requireTicket(interaction.channelId);
       ensureDossierAccess(interaction, ticket, config);
