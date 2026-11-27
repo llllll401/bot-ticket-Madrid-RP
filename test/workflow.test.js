@@ -354,12 +354,11 @@ test('la commande de suppression automatique est strictement réservée et persi
   assert.equal(h.store.isAutomaticDeletionEnabled(), true);
 });
 
-test('un ticket RC STAFF envoie le panneau, puis le bonjour et le formulaire dans deux messages normaux', async (t) => {
+test('un ticket RC STAFF envoie le bonjour puis le formulaire dans deux messages normaux', async (t) => {
   const h = harness(t);
   const { channel } = await openTicket(h, 'rc_staff');
   assert.equal(channel.sent.length, 3);
-  const [panel, greeting, form] = channel.sent.map((message) => message.payload);
-  assert.ok(panel.embeds?.length, 'Le panneau de gestion est envoyé avant le formulaire.');
+  const [greeting, form, panel] = channel.sent.map((message) => message.payload);
   assert.deepEqual(greeting, {
     content: `Bonjour <@${OWNER}> !`,
     allowedMentions: { parse: [], users: [OWNER] },
@@ -372,6 +371,7 @@ test('un ticket RC STAFF envoie le panneau, puis le bonjour et le formulaire dan
   assert.match(form.content, /23\. Es-tu capable de travailler en équipe \?/);
   assert.match(form.content, /👑 Bonne chance à tous ! Un entretien vocal pourra être organisé après la sélection\.$/);
   assert.ok(form.content.length <= 2_000);
+  assert.ok(panel.embeds?.length, 'Le panneau de gestion habituel reste envoyé après le formulaire.');
   assert.equal(h.store.get(channel.id).status, 'form_sent');
   assert.match(channel.name, /^📝-formulaire-envoye-rc-staff-/u);
   const buttons = panel.components.flatMap((row) => row.toJSON().components);

@@ -156,24 +156,6 @@ export class TicketService {
       }
 
       let warning = '';
-      let panelMessage = null;
-      try {
-        // Le panneau reste tout en haut du salon, avant les messages propres au
-        // formulaire RC STAFF qui suivent immédiatement.
-        panelMessage = await channel.send(initialTicketMessage(ticket));
-        try {
-          ticket.panelMessageId = panelMessage.id;
-          ticket.panelVersion = TICKET_PANEL_VERSION;
-          this.store.save(ticket);
-        } catch (error) {
-          this.logger.error('Ticket créé, mais ID du panneau non enregistré :', error);
-          warning = 'Le ticket est ouvert, mais son panneau devra peut-être être réparé avec /ticket-panneau.';
-        }
-      } catch (error) {
-        this.logger.error('Ticket créé, mais panneau impossible à envoyer :', error);
-        warning = 'Le ticket est ouvert, mais le panneau n’a pas pu être envoyé. Prévenez le staff : /ticket-panneau permet de le rétablir.';
-      }
-
       if (ticket.type === 'rc_staff') {
         try {
           // Les deux messages restent volontairement simples et séparés pour
@@ -185,17 +167,22 @@ export class TicketService {
           // Ne pas afficher « Formulaire envoyé » si Discord a refusé le message.
           ticket = this.store.save({ ...ticket, status: 'waiting', updatedAt: now(), renamePending: true });
           this.names.schedule(guild, ticket.channelId);
-          const formWarning = 'Le ticket est ouvert, mais le formulaire RC STAFF n’a pas pu être envoyé. Prévenez le staff.';
-          warning = warning ? `${warning} ${formWarning}` : formWarning;
-          if (panelMessage) {
-            try {
-              await panelMessage.edit(ticketPanel(ticket));
-            } catch (panelError) {
-              this.logger.error('Formulaire RC STAFF absent et panneau impossible à actualiser :', panelError);
-              warning += ' Le panneau n’a pas pu être actualisé : utilisez /ticket-panneau.';
-            }
-          }
+          warning = 'Le ticket est ouvert, mais le formulaire RC STAFF n’a pas pu être envoyé. Prévenez le staff.';
         }
+      }
+      try {
+        const message = await channel.send(initialTicketMessage(ticket));
+        try {
+          ticket.panelMessageId = message.id;
+          ticket.panelVersion = TICKET_PANEL_VERSION;
+          this.store.save(ticket);
+        } catch (error) {
+          this.logger.error('Ticket créé, mais ID du panneau non enregistré :', error);
+          warning = warning || 'Le ticket est ouvert, mais son panneau devra peut-être être réparé avec /ticket-panneau.';
+        }
+      } catch (error) {
+        this.logger.error('Ticket créé, mais panneau impossible à envoyer :', error);
+        warning = warning || 'Le ticket est ouvert, mais le panneau n’a pas pu être envoyé. Prévenez le staff : /ticket-panneau permet de le rétablir.';
       }
       return { created: true, ticket: this.store.get(channel.id), warning };
     });
