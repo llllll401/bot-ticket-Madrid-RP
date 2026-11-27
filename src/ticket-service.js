@@ -321,7 +321,8 @@ export class TicketService {
       if (status === 'review' && ticket.status !== 'form_sent') {
         throw new UserError('Le formulaire doit d’abord être marqué « Formulaire envoyé » avant l’étude.');
       }
-      if (['oral_accepted', 'oral_refused'].includes(status) && ticket.status !== 'review') {
+      if (['oral_accepted', 'oral_refused'].includes(status)
+        && !['review', 'oral_accepted', 'oral_refused'].includes(ticket.status)) {
         throw new UserError('Le ticket doit être « En étude » avant la décision orale.');
       }
 

@@ -407,6 +407,24 @@ test('le parcours RC STAFF impose l’étude avant la décision orale et attribu
   assert.equal(h.guild.memberMap.get(OWNER).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), true);
   await waitForName(h.store, channel);
   assert.match(channel.name, /^✅-accepte-oral-rc-staff-/u);
+  const acceptedPanel = channel.messageMap.get(h.store.get(channel.id).panelMessageId).payload;
+  assert.ok(acceptedPanel.components.flatMap((row) => row.toJSON().components)
+    .some((button) => button.custom_id === IDS.rcStaffOralAccepted));
+  assert.ok(acceptedPanel.components.flatMap((row) => row.toJSON().components)
+    .some((button) => button.custom_id === IDS.rcStaffOralRefused));
+
+  const changedToRefused = await press(h, channel, IDS.rcStaffOralRefused, staffAccess);
+  assert.match(changedToRefused.response.content, /Refusé oral/);
+  assert.equal(h.store.get(channel.id).status, 'oral_refused');
+  assert.equal(h.guild.memberMap.get(OWNER).roles.cache.has(RC_STAFF_ACCEPTED_ROLE_ID), true);
+  const refusedPanel = channel.messageMap.get(h.store.get(channel.id).panelMessageId).payload;
+  assert.ok(refusedPanel.components.flatMap((row) => row.toJSON().components)
+    .some((button) => button.custom_id === IDS.rcStaffOralAccepted));
+  assert.ok(refusedPanel.components.flatMap((row) => row.toJSON().components)
+    .some((button) => button.custom_id === IDS.rcStaffOralRefused));
+
+  await press(h, channel, IDS.rcStaffOralAccepted, staffAccess);
+  assert.equal(h.store.get(channel.id).status, 'oral_accepted');
 });
 
 test('un refus oral n’attribue pas le rôle RC STAFF et une erreur d’attribution ne valide pas l’acceptation', async (t) => {
