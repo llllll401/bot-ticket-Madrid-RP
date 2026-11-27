@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ChannelType, OverwriteType, PermissionFlagsBits, escapeMarkdown } from 'discord.js';
-import { channelName, RC_STAFF_ACCEPTED_ROLE_ID, slugify, statusLabel, ticketNumber, TYPE_BY_KEY } from './catalog.js';
+import { channelName, slugify, statusLabel, ticketNumber, TYPE_BY_KEY } from './catalog.js';
 import { cleanDossierText, MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 import { isFullCategory, isServerChannelLimit, isUnknownChannel, isUnknownMessage, UserError } from './errors.js';
 import { inactivityDueAt, latestHumanMessageSince } from './inactivity.js';
@@ -9,12 +9,9 @@ import { ChannelNameSynchronizer } from './name-sync.js';
 import { snapshotOwnerWrites, STAFF_ACCESS, ticketOverwrites, OWNER_WRITE_PERMISSIONS } from './permissions.js';
 import { initialTicketMessage, rcStaffApplicationForm, rcStaffGreeting, ticketPanel, TICKET_PANEL_VERSION } from './ui.js';
 
-export { RC_STAFF_ACCEPTED_ROLE_ID } from './catalog.js';
-
 // Un verrou par propriétaire protège aussi les déplacements entre deux types.
 const slot = (ownerId) => ownerId;
 const now = () => new Date().toISOString();
-const STANDARD_WORKFLOW_STATUSES = Object.freeze(['waiting', 'claimed', 'progress', 'resolved']);
 
 export class TicketService {
   constructor({ config, store, botUserId, logger = console, clock = Date.now }) {
@@ -114,10 +111,10 @@ export class TicketService {
       if (existing) return { created: false, ticket: existing };
 
       const createdAt = now();
-      let ticket = {
+      const ticket = {
         channelId: '', number: this.store.allocateNumber(), type: typeKey,
         ownerId: user.id, ownerName: user.globalName || user.username || 'membre',
-        status: typeKey === 'rc_staff' ? 'form_sent' : 'waiting', assignedTo: null, assignmentRevision: 0, categoryRevision: 0, progressDetail: null, urgent: false,
+        status: 'waiting', assignedTo: null, assignmentRevision: 0, categoryRevision: 0, progressDetail: null, urgent: false,
         staffRoleIds: [...this.config.staffRolesByType[typeKey]], roleSyncPending: null, internalNotes: [],
         pendingTransition: null, pendingDeletion: null, pendingReclassification: null,
         lastActivityAt: createdAt, inactivityReminder: null,
@@ -164,9 +161,6 @@ export class TicketService {
           await channel.send(rcStaffApplicationForm());
         } catch (error) {
           this.logger.error('Ticket RC STAFF créé, mais formulaire impossible à envoyer :', error);
-          // Ne pas afficher « Formulaire envoyé » si Discord a refusé le message.
-          ticket = this.store.save({ ...ticket, status: 'waiting', updatedAt: now(), renamePending: true });
-          this.names.schedule(guild, ticket.channelId);
           warning = 'Le ticket est ouvert, mais le formulaire RC STAFF n’a pas pu être envoyé. Prévenez le staff.';
         }
       }
@@ -272,7 +266,7 @@ export class TicketService {
   }
 
   async setStatus(guild, channelId, status, actorId, detail = '', { expectedAssignee, expectedAssignmentRevision, expectedCategory, authorize } = {}) {
-    if (!STANDARD_WORKFLOW_STATUSES.includes(status)) throw new Error('Transition de statut invalide.');
+    if (!['waiting', 'claimed', 'progress', 'resolved'].includes(status)) throw new Error('Transition de statut invalide.');
     const cleanedDetail = String(detail).replace(/\s+/g, ' ').trim();
     if (status === 'progress' && (cleanedDetail.length < 2 || cleanedDetail.length > 40 || !slugify(cleanedDetail))) {
       throw new UserError('Indiquez une étape de 2 à 40 caractères contenant au moins une lettre ou un chiffre.');
@@ -297,69 +291,6 @@ export class TicketService {
       const assignmentRevision = (ticket.assignmentRevision ?? 0) + Number(ticket.assignedTo !== assignedTo);
       const next = { ...ticket, status, progressDetail, assignedTo, assignmentRevision, updatedAt: now() };
       return this.#commitTransition(guild, channel, ticket, next, actorId);
-    }, { expectedCategory, authorize });
-  }
-
-  async setRcStaffStatus(guild, channelId, status, actorId, { expectedCategory, authorize } = {}) {
-    if (!['review', 'oral_accepted', 'oral_refused'].includes(status)) throw new Error('Transition RC STAFF invalide.');
-    return this.#withTicket(guild, channelId, async (ticket, channel) => {
-      if (ticket.type !== 'rc_staff') throw new UserError('Cette action est réservée aux tickets RC STAFF.');
-      if (ticket.status === 'closed') throw new UserError('Ce ticket est fermé. Rouvrez-le avant de modifier son statut.');
-      if (status === 'review' && ticket.status !== 'form_sent') {
-        throw new UserError('Le formulaire doit d’abord être marqué « Formulaire envoyé » avant l’étude.');
-      }
-      if (['oral_accepted', 'oral_refused'].includes(status) && ticket.status !== 'review') {
-        throw new UserError('Le ticket doit être « En étude » avant la décision orale.');
-      }
-
-      let grantedRole = false;
-      let member = null;
-      if (status === 'oral_accepted') {
-        try {
-          member = await guild.members.fetch({ user: ticket.ownerId, force: true });
-        } catch (error) {
-          this.logger.error('Impossible de charger le créateur avant l’attribution du rôle RC STAFF :', error);
-          throw new UserError('Impossible de retrouver le créateur pour lui attribuer le rôle RC STAFF.');
-        }
-        if (!member || member.id !== ticket.ownerId || !member.roles?.add) {
-          throw new UserError('Impossible de retrouver le créateur pour lui attribuer le rôle RC STAFF.');
-        }
-        if (!member.roles.cache?.has(RC_STAFF_ACCEPTED_ROLE_ID)) {
-          try {
-            await member.roles.add(
-              RC_STAFF_ACCEPTED_ROLE_ID,
-              `Acceptation orale du ticket #${ticketNumber(ticket.number)} par ${actorId}`,
-            );
-            grantedRole = true;
-          } catch (error) {
-            this.logger.error('Impossible d’attribuer le rôle RC STAFF au créateur :', error);
-            throw new UserError('Impossible d’ajouter le rôle RC STAFF au créateur. Vérifiez le rôle et sa position dans la hiérarchie du bot.');
-          }
-        }
-      }
-
-      const next = {
-        ...ticket, status, progressDetail: null, updatedAt: now(),
-      };
-      try {
-        const result = await this.#commitTransition(guild, channel, ticket, next, actorId);
-        return { ...result, roleGranted: grantedRole };
-      } catch (error) {
-        // Si l'écriture de la transition échoue après l'ajout, éviter de laisser
-        // un rôle accordé sans décision enregistrée. Ne jamais retirer un rôle
-        // qui était déjà présent avant l'action.
-        if (grantedRole && member?.roles?.remove) {
-          try {
-            await member.roles.remove(
-              RC_STAFF_ACCEPTED_ROLE_ID,
-              `Annulation de l’acceptation orale du ticket #${ticketNumber(ticket.number)}`,
-            );
-          } catch (rollbackError) {
-            this.logger.error('Statut RC STAFF non enregistré et rôle impossible à retirer :', rollbackError);
-          }
-        }
-        throw error;
-      }
     }, { expectedCategory, authorize });
   }
 

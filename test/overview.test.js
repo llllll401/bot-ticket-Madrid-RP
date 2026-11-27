@@ -223,22 +223,6 @@ test('les filtres statut, catégorie et responsable sont combinés sans compter 
   assert.match(conflict.response.content, /pas les deux/);
 });
 
-test('les statuts du parcours RC STAFF sont filtrables et comptés dans le tableau', async (t) => {
-  const h = makeHarness(t);
-  const sent = ticket(1, { type: 'rc_staff', status: 'form_sent' });
-  const review = ticket(2, { type: 'rc_staff', status: 'review' });
-  const accepted = ticket(3, { type: 'rc_staff', status: 'oral_accepted' });
-  const refused = ticket(4, { type: 'rc_staff', status: 'oral_refused' });
-  for (const entry of [sent, review, accepted, refused]) h.add(entry);
-
-  const all = await runCommand(h, { userId: SPECIAL_STAFF, options: { statut: 'active', categorie: 'rc_staff' } });
-  assert.deepEqual(mentionedChannels(all), [sent.channelId, review.channelId, accepted.channelId, refused.channelId]);
-  assert.match(description(all), /📝 1 · 🔎 1 · ✅ 1 · ❌ 1/);
-  const filtered = await runCommand(h, { userId: SPECIAL_STAFF, options: { statut: 'review', categorie: 'rc_staff' } });
-  assert.deepEqual(mentionedChannels(filtered), [review.channelId]);
-  assert.match(description(filtered), /en étude/);
-});
-
 test('chaque clic recontrôle le salon, les rôles et le propriétaire de la vue', async (t) => {
   const h = makeHarness(t);
   const item = ticket(1);

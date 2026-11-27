@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { RC_STAFF_WORKFLOW_STATUSES, slugify, STATUSES, TYPE_BY_KEY } from './catalog.js';
+import { slugify, STATUSES, TYPE_BY_KEY } from './catalog.js';
 import { MAX_INTERNAL_NOTES, MAX_INTERNAL_NOTE_LENGTH } from './dossier.js';
 import { INACTIVITY_WARNING_DELAY_MS } from './inactivity.js';
 import { OWNER_WRITE_PERMISSIONS } from './permissions.js';
@@ -80,7 +80,6 @@ function validTicket(ticket, channelId, guildId) {
     return false;
   }
   if (ticket.lastActivityAt != null && Date.parse(ticket.lastActivityAt) < Date.parse(ticket.createdAt)) return false;
-  if (RC_STAFF_WORKFLOW_STATUSES.includes(ticket.status) && ticket.type !== 'rc_staff') return false;
   if (ticket.status === 'progress' && (!ticket.progressDetail || !slugify(ticket.progressDetail))) return false;
   if (ticket.status === 'closed' && (!isDate(ticket.closedAt) || !isClosedWrites(ticket.closedPermissions))) return false;
   if (ticket.status === 'deleted' && ticket.internalNotes?.length) return false;

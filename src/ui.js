@@ -2,11 +2,11 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder,
   RoleSelectMenuBuilder, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle, escapeMarkdown,
 } from 'discord.js';
-import { isRcStaffWorkflowTicket, STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from './catalog.js';
+import { STATUSES, TICKET_TYPES, TYPE_BY_KEY, statusLabel, ticketNumber } from './catalog.js';
 import { MAX_INTERNAL_NOTE_LENGTH, MAX_ROLE_MESSAGE_LENGTH } from './dossier.js';
 
 // Incrémenter si le panneau de gestion ou son texte doivent être mis à jour sur les anciens tickets.
-export const TICKET_PANEL_VERSION = 10;
+export const TICKET_PANEL_VERSION = 9;
 
 export const IDS = Object.freeze({
   open: 'tickets:open',
@@ -32,9 +32,6 @@ export const IDS = Object.freeze({
   waiting: 'ticket:waiting',
   urgent: 'ticket:urgent',
   normal: 'ticket:normal',
-  rcStaffReview: 'ticket:rc-staff:review',
-  rcStaffOralAccepted: 'ticket:rc-staff:oral-accepted',
-  rcStaffOralRefused: 'ticket:rc-staff:oral-refused',
   progress: 'ticket:progress',
   progressSubmit: 'ticket:progress:submit',
   resolve: 'ticket:resolve',
@@ -61,7 +58,7 @@ export function publicPanel() {
     )
     .addFields({
       name: 'Suivi des tickets',
-      value: '🔴 En attente · 🟠 Pris en charge · 🟡 En cours · 🟢 Traité\nRC STAFF : 📝 Formulaire envoyé · 🔎 En étude · ✅/❌ Décision orale',
+      value: '🔴 En attente · 🟠 Pris en charge · 🟡 En cours · 🟢 Traité',
     })
     .setFooter({ text: 'Un ticket ouvert par type et par personne.' });
   const select = new StringSelectMenuBuilder()
@@ -168,44 +165,25 @@ export function ticketPanel(ticket) {
       : (closed ? 'Ancien ticket fermé : le créateur conserve un accès en lecture seule.' : 'Le nom du salon indique aussi le statut du ticket.') })
     .setTimestamp(new Date(ticket.createdAt));
 
-  const rcStaffWorkflow = isRcStaffWorkflowTicket(ticket);
   const rows = closed
     ? [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(IDS.reopen).setLabel('Rouvrir l’ancien ticket').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(IDS.delete).setLabel('Supprimer le salon').setStyle(ButtonStyle.Danger),
     )]
-    : (() => {
-      const actions = [];
-      if (rcStaffWorkflow && ticket.status === 'form_sent') {
-        actions.push(new ButtonBuilder()
-          .setCustomId(IDS.rcStaffReview).setLabel('En étude').setEmoji('🔎').setStyle(ButtonStyle.Primary));
-      }
-      if (rcStaffWorkflow && ticket.status === 'review') {
-        actions.push(
-          new ButtonBuilder()
-            .setCustomId(IDS.rcStaffOralAccepted).setLabel('Accepté oral').setEmoji('✅').setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(IDS.rcStaffOralRefused).setLabel('Refusé oral').setEmoji('❌').setStyle(ButtonStyle.Danger),
-        );
-      }
-      if (!rcStaffWorkflow) {
-        actions.push(new ButtonBuilder()
+    : [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
           .setCustomId(`${IDS.assignmentToggle}${ticket.type}:${ticket.categoryRevision ?? 0}:${ticket.assignmentRevision ?? 0}`)
-          .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success));
-      }
-      actions.push(
+          .setLabel('Prendre en charge / laisser').setEmoji('🙋').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(IDS.manage).setLabel('Gérer le dossier').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(IDS.remindOwner).setLabel('Rappeler le membre').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId(IDS.close).setLabel('Fermer').setEmoji('⚫').setStyle(ButtonStyle.Danger),
-      );
-      return [
-        new ActionRowBuilder().addComponents(actions),
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(IDS.changeCategory).setLabel('Changer la catégorie').setEmoji('📂').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId(IDS.contactRole).setLabel('Contacter un rôle').setEmoji('📣').setStyle(ButtonStyle.Secondary),
-        ),
-      ];
-    })();
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(IDS.changeCategory).setLabel('Changer la catégorie').setEmoji('📂').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(IDS.contactRole).setLabel('Contacter un rôle').setEmoji('📣').setStyle(ButtonStyle.Secondary),
+      ),
+    ];
   return {
     content: `Bienvenue <@${ticket.ownerId}> ! Décrivez votre demande et patientez. Équipe concernée : ${ticket.staffRoleIds.map((id) => `<@&${id}>`).join(' ')}`,
     embeds: [embed], components: rows, allowedMentions: { parse: [] },
@@ -239,19 +217,18 @@ const backRow = (viewerId) => new ActionRowBuilder().addComponents(
 );
 
 export function dossierMenu(ticket, viewerId, notice = '') {
-  const options = [
-    { label: 'Prendre / reprendre', value: 'claim', emoji: '🟠' },
-    { label: 'En cours de…', value: 'progress', emoji: '🟡' },
-    { label: 'Marquer traité', value: 'resolve', emoji: '🟢' },
-    { label: 'Remettre en attente', value: 'waiting', emoji: '🔴' },
-    { label: 'Modifier la priorité', value: 'priority', emoji: '🚨' },
-    { label: 'Ajouter une note interne', value: 'note-add', emoji: '📝' },
-    { label: 'Consulter les notes internes', value: 'note-list', emoji: '🔒' },
-  ];
   const select = new StringSelectMenuBuilder()
     .setCustomId(`${IDS.manageMenu}${viewerId}`)
     .setPlaceholder('Choisir une action de gestion')
-    .addOptions(options);
+    .addOptions(
+      { label: 'Prendre / reprendre', value: 'claim', emoji: '🟠' },
+      { label: 'En cours de…', value: 'progress', emoji: '🟡' },
+      { label: 'Marquer traité', value: 'resolve', emoji: '🟢' },
+      { label: 'Remettre en attente', value: 'waiting', emoji: '🔴' },
+      { label: 'Modifier la priorité', value: 'priority', emoji: '🚨' },
+      { label: 'Ajouter une note interne', value: 'note-add', emoji: '📝' },
+      { label: 'Consulter les notes internes', value: 'note-list', emoji: '🔒' },
+    );
   const summary = `**Gestion du ticket #${ticketNumber(ticket.number)}** · ${TYPE_BY_KEY[ticket.type].label}\n`
     + `${escapeMarkdown(statusLabel(ticket))} · Priorité : ${ticket.urgent ? '🚨 urgente' : 'normale'} · Notes internes : ${(ticket.internalNotes ?? []).length}`;
   return { content: `${notice ? `${notice}\n\n` : ''}${summary}`, embeds: [], components: [new ActionRowBuilder().addComponents(select)], allowedMentions: { parse: [] } };
