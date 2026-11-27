@@ -28,7 +28,14 @@ export const TICKET_TYPES = Object.freeze([
 
 export const TYPE_BY_KEY = Object.freeze(Object.fromEntries(TICKET_TYPES.map((type) => [type.key, type])));
 
+export const RC_STAFF_WORKFLOW_STATUSES = Object.freeze(['form_sent', 'review', 'oral_accepted', 'oral_refused']);
+export const RC_STAFF_ACCEPTED_ROLE_ID = '1555654481058865152';
+
 export const STATUSES = Object.freeze({
+  form_sent: { emoji: '📝', label: 'Formulaire envoyé', slug: 'formulaire-envoye', color: 0x3498db },
+  review: { emoji: '🔎', label: 'En étude', slug: 'en-etude', color: 0x9b59b6 },
+  oral_accepted: { emoji: '✅', label: 'Accepté oral', slug: 'accepte-oral', color: 0x2ecc71 },
+  oral_refused: { emoji: '❌', label: 'Refusé oral', slug: 'refuse-oral', color: 0xe74c3c },
   waiting: { emoji: '🔴', label: 'En attente', slug: 'attente', color: 0xe74c3c },
   claimed: { emoji: '🟠', label: 'Pris en charge', slug: 'pris-en-charge', color: 0xe67e22 },
   progress: { emoji: '🟡', label: 'En cours', slug: 'en-cours', color: 0xf1c40f },
@@ -36,6 +43,10 @@ export const STATUSES = Object.freeze({
   closed: { emoji: '⚫', label: 'Fermé', slug: 'ferme', color: 0x7f8c8d },
   deleted: { emoji: '⚫', label: 'Supprimé', slug: 'supprime', color: 0x7f8c8d },
 });
+
+export function isRcStaffWorkflowTicket(ticket) {
+  return ticket?.type === 'rc_staff' && RC_STAFF_WORKFLOW_STATUSES.includes(ticket.status);
+}
 
 export function slugify(value) {
   return String(value ?? '')
