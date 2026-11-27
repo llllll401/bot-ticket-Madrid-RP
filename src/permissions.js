@@ -1,5 +1,5 @@
 import { ChannelType, OverwriteType, PermissionFlagsBits } from 'discord.js';
-import { TICKET_TYPES } from './catalog.js';
+import { RC_STAFF_ACCEPTED_ROLE_ID, TICKET_TYPES } from './catalog.js';
 
 export const STAFF_ACCESS = Object.freeze({
   ViewChannel: true,
@@ -72,10 +72,13 @@ export async function validateGuildConfiguration(guild, config) {
     .map(([name]) => name);
   if (missing.length) throw new Error(`Permissions manquantes pour le bot : ${missing.join(', ')}.`);
 
-  const roleIds = new Set(Object.values(config.staffRolesByType).flat());
+  const roleIds = new Set([...Object.values(config.staffRolesByType).flat(), RC_STAFF_ACCEPTED_ROLE_ID]);
   for (const roleId of roleIds) {
     const role = await guild.roles.fetch(roleId, { force: true });
-    if (!role) throw new Error(`Rôle staff introuvable sur le serveur : ${roleId}.`);
+    if (!role) {
+      const label = roleId === RC_STAFF_ACCEPTED_ROLE_ID ? 'Rôle RC STAFF à attribuer' : 'Rôle staff';
+      throw new Error(`${label} introuvable sur le serveur : ${roleId}.`);
+    }
   }
   const categoryIds = new Set();
   for (const type of TICKET_TYPES) {

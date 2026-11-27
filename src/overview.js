@@ -9,12 +9,14 @@ import { isStaff } from './permissions.js';
 const PREFIX = 'tickets:overview:';
 const SNOWFLAKE = /^\d{17,20}$/;
 const PAGE_SIZE = 8;
-const STATUS_ORDER = ['waiting', 'claimed', 'progress', 'resolved', 'closed'];
+const STATUS_ORDER = ['waiting', 'claimed', 'progress', 'resolved', 'closed', 'form_sent', 'review', 'oral_accepted', 'oral_refused'];
 const STATUS_FILTERS = new Set(['active', ...STATUS_ORDER, 'all']);
 const PRIORITY_FILTERS = new Set(['all', 'urgent', 'normal']);
 const STATUS_LABELS = {
-  active: 'tickets ouverts', waiting: 'en attente', claimed: 'pris en charge',
-  progress: 'en cours', resolved: 'traités', closed: 'anciens tickets fermés', all: 'ouverts et anciens fermés',
+  active: 'tickets ouverts', form_sent: 'formulaires envoyés', review: 'en étude',
+  waiting: 'en attente', claimed: 'pris en charge', progress: 'en cours',
+  oral_accepted: 'acceptés oralement', oral_refused: 'refusés oralement',
+  resolved: 'traités', closed: 'anciens tickets fermés', all: 'ouverts et anciens fermés',
 };
 
 function validateQuery(query) {
