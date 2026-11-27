@@ -72,6 +72,80 @@ export function publicPanel() {
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(select)], allowedMentions: { parse: [] } };
 }
 
+export function rcStaffGreeting(ticket) {
+  return {
+    content: `Bonjour <@${ticket.ownerId}> !`,
+    allowedMentions: { parse: [], users: [ticket.ownerId] },
+  };
+}
+
+export function rcStaffApplicationForm() {
+  return {
+    content: `🛡️・𝐅𝐎𝐑𝐌𝐔𝐋𝐀𝐈𝐑𝐄 𝐑𝐂 𝐒𝐓𝐀𝐅𝐅 — 𝐑𝐄𝐍𝐍𝐄𝐒 𝐑𝐏
+
+Bienvenue ! Réponds sérieusement à toutes les questions. Nous recherchons des personnes matures, actives et respectueuses du règlement.
+
+📋・𝐈𝐍𝐅𝐎𝐑𝐌𝐀𝐓𝐈𝐎𝐍𝐒
+
+1. Âge ?
+
+2. Ancienneté sur Rennes RP ?
+
+3. Staff ailleurs actuellement ? (Serveur/grade)
+
+4. Déjà été staff ailleurs ? (Serveur/grade)
+
+5. Disponibilités ? (Semaine, week-end, vacances)
+
+🧠・𝐂𝐎𝐍𝐍𝐀𝐈𝐒𝐒𝐀𝐍𝐂𝐄𝐒 𝐑𝐏
+
+6. Définition du Fear RP ?
+
+7. Définition du Pain RP ?
+
+8. Définition du Meta Gaming ?
+
+9. Zone de masse RP : définition et règles ?
+
+10. Zones safe : liste et utilité ?
+
+⚖️・𝐌𝐈𝐒𝐄𝐒 𝐄𝐍 𝐒𝐈𝐓𝐔𝐀𝐓𝐈𝐎𝐍
+
+11. Un joueur No-Fear RP : quelle action ?
+
+12. Un joueur Meta Gaming : quelle réaction ?
+
+13. Dispute et insultes en scène : comment gérer ?
+
+14. Un staff enfreint le règlement : quelle action ?
+
+15. Un ami enfreint le règlement : sanction identique ? Pourquoi ?
+
+🔧・𝐂𝐎𝐍𝐍𝐀𝐈𝐒𝐒𝐀𝐍𝐂𝐄𝐒 𝐒𝐓𝐀𝐅𝐅
+
+16. Motivations pour rejoindre le staff ?
+
+17. Qualités et défauts ?
+
+18. Réaction face à un joueur provocateur ou borné ?
+
+19. Pourquoi toi et pas un autre ?
+
+20. Un staff abuse de ses permissions : quelle action ?
+
+21. Comment restes-tu impartial en conflit ?
+
+22. Quelles commandes de modération as-tu déjà utilisées ?
+
+23. Es-tu capable de travailler en équipe ?
+
+━━━━━━━━━━━━━━━━━━━━
+
+👑 Bonne chance à tous ! Un entretien vocal pourra être organisé après la sélection.`,
+    allowedMentions: { parse: [] },
+  };
+}
+
 export function ticketPanel(ticket) {
   const closed = ticket.status === 'closed';
   const embed = new EmbedBuilder()
